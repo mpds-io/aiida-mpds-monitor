@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "aiida-mpds-monitor"
+version = "0.1.0"
+description = "AiiDA webhook monitor for MPDS workflows"
+readme = "README.md"
+license = { text = "MIT" }
+authors = [
+    { name = "Anton Domnin", email = "a.v.daomnin@gmail.com" }
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Topic :: Scientific/Engineering"
+]
+requires-python = ">=3.8"
+dependencies = [
+    "aiida-core>=2.0",
+    "PyYAML",
+    "requests"
+]
+
+[project.urls]
+Homepage = "https://github.com/akvatol/aiida_mpds_monitor"
+Repository = "https://github.com/akvatol/aiida_mpds_monitor"
+
+[project.scripts]
+aiida-mpds-monitor = "aiida_mpds_monitor.daemon:main"
+aiida-mpds-submit = "aiida_mpds_monitor.submit:main"
+aiida-mpds-stub = "aiida_mpds_monitor.stub_server:main"

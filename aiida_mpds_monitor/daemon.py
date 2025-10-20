@@ -38,7 +38,7 @@ def setup_logger(config):
     file_handler.setFormatter(file_formatter)
     logger.addHandler(file_handler)
 
-    # Console handler (optional, можно убрать в продакшене)
+    # Console handler (optional, can be removed in production)
     console_handler = logging.StreamHandler(sys.stdout)
     console_handler.setFormatter(file_formatter)
     logger.addHandler(console_handler)
@@ -52,7 +52,7 @@ def send_webhook(webhook_url, payload, status):
     try:
         response = requests.get(webhook_url, params=params, timeout=10)
         return response.status_code == 200
-    except Exception as _:
+    except Exception:
         return False
 
 
@@ -64,10 +64,10 @@ def get_node_status(node):
     return state
 
 
-def process_base_workchain(base_node, webhook_url, logger, dry_run=False):
+def process_base_workchain(base_node, webhook_url, logger, no_marks=False):
     label = base_node.label
     if not label or not label.strip():
-        logger.debug(f"⏭Skipping BaseCrystalWorkChain {base_node.pk} — empty label")
+        logger.debug(f"Skipping BaseCrystalWorkChain {base_node.pk} — empty label")
         return
 
     label = label.strip()
@@ -76,47 +76,44 @@ def process_base_workchain(base_node, webhook_url, logger, dry_run=False):
     already_started = base_node.base.extras.get(EXTRA_STARTED, False)
     if not already_started:
         if base_node.process_state.value != "created":
-            if dry_run:
-                logger.info(f"[TEST] Would send START webhook for '{label}' ({base_node.pk})")
-            else:
-                if send_webhook(webhook_url, label, "started"):
+            if send_webhook(webhook_url, label, "started"):
+                if not no_marks:
                     base_node.set_extra(EXTRA_STARTED, True)
-                    logger.info(f"START webhook sent for '{label}' ({base_node.pk})")
-                else:
-                    logger.warning(f"Failed to send START webhook for '{label}'")
+                logger.info(f"START webhook sent for '{label}' ({base_node.pk})")
+            else:
+                logger.warning(f"Failed to send START webhook for '{label}'")
 
     # === FINISH ===
     already_finished = base_node.base.extras.get(EXTRA_FINISHED, False)
     if not already_finished:
         if base_node.is_finished:
             status = get_node_status(base_node)
-            if dry_run:
-                logger.info(f"[TEST] Would send FINISH webhook for '{label}' ({status})")
-            else:
-                if send_webhook(webhook_url, label, status):
+            if send_webhook(webhook_url, label, status):
+                if not no_marks:
                     base_node.set_extra(EXTRA_FINISHED, True)
-                    logger.info(f"FINISH webhook sent for '{label}' ({status})")
-                else:
-                    logger.warning(f"Failed to send FINISH webhook for '{label}'")
+                logger.info(f"FINISH webhook sent for '{label}' ({status})")
+            else:
+                logger.warning(f"Failed to send FINISH webhook for '{label}'")
 
 
-def scan_and_process(config, logger, dry_run=False):
+def scan_and_process(config, logger, no_marks=False):
     webhook_url = config.webhook_url
 
+    # Request ALL parent nodes of the specified type that have not yet been processed.
+    # Including those that failed!
     qb = QueryBuilder()
     qb.append(
         WorkChainNode,
         filters={"attributes.process_label": {"in": config.workchain_types}},
         tag="parent"
     )
-    if not dry_run:
-        qb.add_filter("parent", {"extras": {"!has_key": EXTRA_PARENT_PROCESSED}})
+    # We process only those that are not yet marked as processed
+    qb.add_filter("parent", {"extras": {"!has_key": EXTRA_PARENT_PROCESSED}})
 
     for parent_node in qb.iterall():
         parent_node = parent_node[0]
         logger.debug(f"Processing parent workchain {parent_node.pk}")
 
-        # Check if parent is in a failed state
         parent_is_broken = (
             parent_node.is_failed or
             parent_node.is_excepted or
@@ -129,58 +126,126 @@ def scan_and_process(config, logger, dry_run=False):
             if isinstance(n, WorkChainNode) and n.process_label == BASE_CRYSTAL_TYPE
         ]
 
-        # If parent is broken, send error for the LAST BaseCrystalWorkChain (if any)
         if parent_is_broken:
-            if not dry_run and not parent_node.get_extra(EXTRA_PARENT_ERROR_SENT, False):
+            if not parent_node.get_extra(EXTRA_PARENT_ERROR_SENT, False):
                 if base_nodes:
-                    # Sort by PK (or ctime) to get the most recent
+                    # Отправляем finished-500 для КАЖДОЙ подноды с label (а не только последней)
                     for base in base_nodes:
                         label = base.label
                         if label and label.strip():
                             status = "finished-500"
                             if send_webhook(webhook_url, label.strip(), status):
-                                logger.warning(f"ERROR webhook sent for last subtask '{label}' (parent {parent_node.pk} failed)")
-                                parent_node.set_extra(EXTRA_PARENT_ERROR_SENT, True)
+                                logger.warning(f"ERROR webhook sent for subtask '{label}' (parent {parent_node.pk} failed)")
                             else:
                                 logger.error(f"Failed to send ERROR webhook for '{label}'")
-                        else:
-                            logger.debug(f"Parent {parent_node.pk} failed, but last BaseCrystalWorkChain has no label — skipping webhook")
-                            parent_node.set_extra(EXTRA_PARENT_ERROR_SENT, True)  # still mark to avoid retry
+                        # else: skip empty label
+                    # Mark that the error has been handled (if allowed)
+                    if not no_marks:
+                        parent_node.set_extra(EXTRA_PARENT_ERROR_SENT, True)
                 else:
-                    logger.debug(f"Parent {parent_node.pk} failed but launched no BaseCrystalWorkChain — nothing to report")
-                    parent_node.set_extra(EXTRA_PARENT_ERROR_SENT, True)
+                    logger.debug(f"Parent {parent_node.pk} failed but has no BaseCrystalWorkChain — nothing to report")
 
-            # Mark parent as processed regardless
-            if not dry_run:
+            # Mark the parent as processed (if allowed)
+            if not no_marks:
                 parent_node.set_extra(EXTRA_PARENT_PROCESSED, True)
             continue
 
-        # Normal case: parent is OK
+        # Normal processing
         for base_node in base_nodes:
-            process_base_workchain(base_node, webhook_url, logger, dry_run=dry_run)
+            process_base_workchain(base_node, webhook_url, logger, no_marks=no_marks)
 
-        if not dry_run:
+        if not no_marks:
             parent_node.set_extra(EXTRA_PARENT_PROCESSED, True)
             logger.info(f"Parent {parent_node.pk} marked as processed")
         else:
+            logger.info(f"Parent {parent_node.pk} processed (no marks set)")
+
+
+# For dry-run testing
+def scan_and_process_dry_run(config, logger):
+
+    qb = QueryBuilder()
+    qb.append(
+        WorkChainNode,
+        filters={"attributes.process_label": {"in": config.workchain_types}},
+        tag="parent"
+    )
+    qb.add_filter("parent", {"extras": {"!has_key": EXTRA_PARENT_PROCESSED}})
+
+    for parent_node in qb.iterall():
+        parent_node = parent_node[0]
+        logger.debug(f"[TEST] Would process parent {parent_node.pk}")
+
+        parent_is_broken = (
+            parent_node.is_failed or
+            parent_node.is_excepted or
+            parent_node.is_killed
+        )
+
+        called_nodes = parent_node.called
+        base_nodes = [
+            n for n in called_nodes
+            if isinstance(n, WorkChainNode) and n.process_label == BASE_CRYSTAL_TYPE
+        ]
+
+        if parent_is_broken:
+            if base_nodes:
+                for base in base_nodes:
+                    label = base.label
+                    if label and label.strip():
+                        logger.info(f"[TEST] Would send ERROR webhook for '{label}' (parent failed)")
             logger.info(f"[TEST] Would mark parent {parent_node.pk} as processed")
+            continue
+
+        for base_node in base_nodes:
+            label = base_node.label
+            if not label or not label.strip():
+                continue
+            label = label.strip()
+            if base_node.process_state.value != "created":
+                logger.info(f"[TEST] Would send START webhook for '{label}'")
+            if base_node.is_finished:
+                status = get_node_status(base_node)
+                logger.info(f"[TEST] Would send FINISH webhook for '{label}' ({status})")
+
+        logger.info(f"[TEST] Would mark parent {parent_node.pk} as processed")
 
 
 def main():
     import argparse
     parser = argparse.ArgumentParser(description="AiiDA MPDS Monitor Daemon")
     parser.add_argument(
-        "--test",
+        "--dry-run",
         action="store_true",
-        help="Run in test mode: scan and log actions, but DO NOT send webhooks or mark nodes."
+        help="Dry-run: show what would be done, but DO NOT send webhooks or set marks."
+    )
+    parser.add_argument(
+        "--no-marks",
+        action="store_true",
+        help="Send webhooks, but DO NOT set any extras on nodes (useful for recovery or one-off runs)."
     )
     args = parser.parse_args()
+
+    # In --test mode, no marks are set and webhooks are not sent.
+    # In --no-marks mode, webhooks are sent, but no marks are set.
+    dry_run = args.test
+    no_marks = args.no_marks
+
+    if dry_run and no_marks:
+        print("--dry-run and --no-marks are mutually exclusive. Using --test.")
+        no_marks = False
 
     load_profile()
     config = load_config()
     logger = setup_logger(config)
 
-    mode = "TEST (dry-run)" if args.test else "NORMAL"
+    if dry_run:
+        mode = "TEST (dry-run, no webhooks, no marks)"
+    elif no_marks:
+        mode = "NO-MARKS (webhooks sent, no extras set)"
+    else:
+        mode = "NORMAL"
+
     logger.info(f"Starting AiiDA MPDS Monitor daemon [{mode}]")
     logger.info(f"Webhook URL: {config.webhook_url}")
     logger.info(f"Poll interval: {config.poll_interval}s")
@@ -189,7 +254,11 @@ def main():
 
     while True:
         try:
-            scan_and_process(config, logger, dry_run=args.test)
+            if dry_run:
+                # In test mode, we emulate the behavior without sending
+                scan_and_process_dry_run(config, logger)
+            else:
+                scan_and_process(config, logger, no_marks=no_marks)
         except KeyboardInterrupt:
             logger.info("Shutting down gracefully...")
             break

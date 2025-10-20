@@ -12,8 +12,8 @@ DEFAULT_CONFIG = {
     "workchain_types": [
         "MPDSStructureWorkChain"
     ],
-    "log_file": "/var/log/aiida_mpds_monitor.log",
-    "log_level": "DEBUG", # INFO, DEBUG, INFO, WARNING, ERROR
+    "log_file": "/data/aiida_mpds_monitor.log",
+    "log_level": "WARNING", # INFO, DEBUG, INFO, WARNING, ERROR
     "log_max_bytes": 10 * 1024 * 1024,  # 10 MB
     "log_backup_count": 3,
 }

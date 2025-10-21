@@ -46,7 +46,7 @@ The daemon will:
 * Scan for new parent workflows every poll_interval seconds.
 * For each BaseCrystalWorkChain with a label:
     * Send status=`started` when it begins.
-    * Send status=`finished-code` (or excepted, killed) when done.
+    * Send status=`finished-code` (`finished-500` if killed or excepted) when done.
          
 * Mark processed workflows to avoid duplicates.
 

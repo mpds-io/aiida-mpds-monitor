@@ -55,7 +55,7 @@ Options:
     `--dry-run`: Dry-run mode — scans nodes and logs actions but does not send webhooks or mark nodes.
     `--no-marks`: Run and send webhooks on server, but not mark them. For testing purposes only.
 
-⚠️ `--dry-run` and `--no-marks` are incompatible - --test takes precedence.
+⚠️ `--dry-run` and `--no-marks` are incompatible - `--dry-run` takes precedence.
 
 
 2. Manually submit results for a parent workflow:

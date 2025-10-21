@@ -50,6 +50,6 @@ def load_config():
     with open(config_path) as f:
         user_config = yaml.safe_load(f) or {}
 
-    # Слияние с дефолтами
+    # Merging user config with defaults
     final_config = {**DEFAULT_CONFIG, **user_config}
     return AttributeDict(final_config)

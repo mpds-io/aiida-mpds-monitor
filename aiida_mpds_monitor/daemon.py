@@ -129,7 +129,7 @@ def scan_and_process(config, logger, no_marks=False):
         if parent_is_broken:
             if not parent_node.base.extras.get(EXTRA_PARENT_ERROR_SENT, False):
                 if base_nodes:
-                    # Отправляем finished-500 для КАЖДОЙ подноды с label (а не только последней)
+                    # If parent is broken send finished-500 for each base workchain
                     for base in base_nodes:
                         label = base.label
                         if label and label.strip():

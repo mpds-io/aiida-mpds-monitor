@@ -127,7 +127,7 @@ def scan_and_process(config, logger, no_marks=False):
         ]
 
         if parent_is_broken:
-            if not parent_node.get_extra(EXTRA_PARENT_ERROR_SENT, False):
+            if not parent_node.base.extras.get(EXTRA_PARENT_ERROR_SENT, False):
                 if base_nodes:
                     # Отправляем finished-500 для КАЖДОЙ подноды с label (а не только последней)
                     for base in base_nodes:
@@ -228,7 +228,7 @@ def main():
 
     # In --test mode, no marks are set and webhooks are not sent.
     # In --no-marks mode, webhooks are sent, but no marks are set.
-    dry_run = args.test
+    dry_run = args.dry_run
     no_marks = args.no_marks
 
     if dry_run and no_marks:

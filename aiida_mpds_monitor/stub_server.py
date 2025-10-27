@@ -1,6 +1,7 @@
-# stub_server.py
+
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
+
 
 class WebhookHandler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -28,6 +29,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
         # Turn off default logging
         return
+
 
 def main():
     server_address = ('localhost', 8080)

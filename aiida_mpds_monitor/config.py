@@ -1,8 +1,10 @@
-# aiida_mpds_monitor/config.py
+
 import os
 import yaml
 from pathlib import Path
+
 from aiida.common.extendeddicts import AttributeDict
+
 
 DEFAULT_CONFIG_PATH = Path("/etc/aiida_mpds_monitor/conf.yaml")
 
@@ -18,6 +20,7 @@ DEFAULT_CONFIG = {
     "log_backup_count": 3,
 }
 
+
 def ensure_config_dir():
     config_dir = DEFAULT_CONFIG_PATH.parent
     if not config_dir.exists():
@@ -28,6 +31,7 @@ def ensure_config_dir():
             fallback = Path.home() / ".config/aiida_mpds_monitor/conf.yaml"
             return fallback
     return DEFAULT_CONFIG_PATH
+
 
 def load_config():
     config_path = ensure_config_dir()

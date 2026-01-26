@@ -18,7 +18,7 @@ Fallback (user): ~/.config/aiida_mpds_monitor/conf.yaml (if no write access to /
 
 ```yaml
 # Webhook endpoint (GET request with ?payload=...&status=...)
-webhook_url: "webhook_url: http://localhost:8080"
+webhook_url: "http://localhost:8080"
 
 # How often to scan AiiDA database (seconds)
 poll_interval: 60

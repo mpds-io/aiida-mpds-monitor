@@ -11,9 +11,9 @@ BASE_CRYSTAL_TYPE = "BaseCrystalWorkChain"
 
 def send_webhook(webhook_url, payload, status):
     import requests
-    params = {"payload": payload, "status": status}
+    data = {"payload": payload, "status": status}
     try:
-        response = requests.get(webhook_url, params=params, timeout=10)
+        response = requests.post(webhook_url, json=data, timeout=10)
         return response.status_code == 200
     except Exception as e:
         print(f"Webhook error: {e}", file=sys.stderr)

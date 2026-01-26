@@ -1,16 +1,17 @@
 # stub_server.py
 from http.server import HTTPServer, BaseHTTPRequestHandler
-from urllib.parse import urlparse, parse_qs
+import json
 
 class WebhookHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        # Parse query parameters
-        parsed_path = urlparse(self.path)
-        query_params = parse_qs(parsed_path.query)
+    def do_POST(self):
+        # Parse request body
+        content_length = int(self.headers.get('Content-Length', 0))
+        body = self.rfile.read(content_length)
+        data = json.loads(body.decode('utf-8'))
 
         # get data
-        payload = query_params.get('payload', [''])[0]
-        status = query_params.get('status', [''])[0]
+        payload = data.get('payload', '')
+        status = data.get('status', '')
 
         # Console output
         print("\n" + "="*50)

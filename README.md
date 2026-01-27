@@ -5,7 +5,7 @@ A lightweight daemon and CLI tool to monitor AiiDA workflows (e.g., MPDSStructur
 ## Installation
 Install from source (recommended):
 ```bash
-git clone https://github.com/your-org/aiida-mpds-monitor.git
+git clone https://github.com/mpds-io/aiida-mpds-monitor.git
 cd aiida-mpds-monitor
 pip install .
 ```
@@ -13,12 +13,15 @@ pip install .
 ## Configuration
 On first run, the tool creates a default config file: 
 
-System-wide: /etc/aiida_mpds_monitor/conf.yaml  
-Fallback (user): ~/.config/aiida_mpds_monitor/conf.yaml (if no write access to /etc)
+System-wide: `/etc/aiida_mpds_monitor/conf.yaml`
+Fallback (user): `~/.config/aiida_mpds_monitor/conf.yaml` (if no write access to /etc)
 
 ```yaml
-# Webhook endpoint (GET request with ?payload=...&status=...)
+# Webhook endpoint
 webhook_url: "http://localhost:8080"
+
+# Optional: API key for webhook authentication (Bearer token)
+key: ""
 
 # How often to scan AiiDA database (seconds)
 poll_interval: 60
@@ -26,13 +29,12 @@ poll_interval: 60
 # WorkChain types to monitor (must match `process_label`)
 workchain_types:
   - "MPDSStructureWorkChain"
-  - "CIFStructureWorkChain"
 
 # Logging
-log_file: "/data/aiida_mpds_monitor.log"
+log_file: "/path/to/logs/aiida_mpds_monitor.log"
 log_level: "WARNING"          # DEBUG, INFO, WARNING, ERROR
-log_max_bytes: 10485760    # 10 MB per log file
-log_backup_count: 5        # Keep 5 rotated logs
+log_max_bytes: 10485760       # 10 MB per log file
+log_backup_count: 5           # Keep 5 rotated logs
 ```
 
 ## Usage
@@ -43,19 +45,19 @@ aiida-mpds-monitor
 
 The daemon will: 
 
-* Scan for new parent workflows every poll_interval seconds.
+* Scan for new parent workflows every `poll_interval` seconds.
 * For each BaseCrystalWorkChain with a label:
-    * Send status=`started` when it begins.
-    * Send status=`finished-code` (`finished-500` if killed or excepted) when done.
+    * Send webhook with status when it finishes.
+    * Automatically detect child calculation failures.
          
 * Mark processed workflows to avoid duplicates.
 
 Options: 
 
     `--dry-run`: Dry-run mode — scans nodes and logs actions but does not send webhooks or mark nodes.
-    `--no-marks`: Run and send webhooks on server, but not mark them. For testing purposes only.
+    `--no-marks`: Run and send webhooks on server, but do not mark them as processed. For recovery or one-off runs.
 
-⚠️ `--dry-run` and `--no-marks` are incompatible - `--dry-run` takes precedence.
+⚠️ `--dry-run` and `--no-marks` are mutually exclusive - `--dry-run` takes precedence.
 
 
 2. Manually submit results for a parent workflow:

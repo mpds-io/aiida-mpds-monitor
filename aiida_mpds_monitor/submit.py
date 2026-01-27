@@ -23,9 +23,13 @@ def send_webhook(webhook_url, payload, status):
 def get_node_status(node):
     state = node.process_state.value
     if state.lower() == "finished":
+        excepted = node.is_excepted
         exit_code = node.exit_code.status if node.exit_code else 0
-        if exit_code == 0:
+        if exit_code == 0 and not excepted:
             return "finished"
+        # if node broke due to unexpected error (in code, for example)
+        if excepted and not node.is_failed:
+            return "excepted"
         else:
             return f"excepted-{exit_code}"
     elif state.lower() in ["running", "submitting", "created"]:

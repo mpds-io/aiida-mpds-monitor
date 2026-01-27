@@ -20,12 +20,43 @@ def send_webhook(webhook_url, payload, status):
         return False
 
 
+def check_child_calculation(base_node):
+    """Check if the last CrystalParallelCalculation child failed.
+    Returns True if the child is broken, False otherwise.
+    
+    Note: If CrystalParallelCalculation was retried, we check only the LAST attempt.
+    If the last attempt succeeded, we return False even if earlier attempts failed.
+    """
+    try:
+        called_nodes = base_node.called
+        crystal_calcs = [
+            n for n in called_nodes
+            if hasattr(n, 'process_label') and n.process_label == "CrystalParallelCalculation"
+        ]
+        if not crystal_calcs:
+            return False
+        
+        # Check the last (most recent) CrystalParallelCalculation by PK
+        # If the calculation was retried, we only care about the final attempt
+        last_calc = max(crystal_calcs, key=lambda n: n.pk)
+        is_broken = last_calc.is_failed or last_calc.is_excepted or last_calc.is_killed
+        if is_broken:
+            logging.warning(f"BaseCrystalWorkChain {base_node.pk} finished but child CrystalParallelCalculation {last_calc.pk} failed")
+        return is_broken
+    except Exception:
+        return False
+
+
 def get_node_status(node):
     state = node.process_state.value
     if state.lower() == "finished":
+        # Check if any child CrystalParallelCalculation failed
+        if check_child_calculation(node):
+            return "excepted"
+        
         excepted = node.is_excepted
         exit_code = node.exit_code.status if node.exit_code else 0
-        if exit_code == 0 and not excepted:
+        if not excepted and exit_code == 0:
             return "finished"
         # if node broke due to unexpected error (in code, for example)
         if excepted and not node.is_failed:
@@ -63,7 +94,6 @@ def submit_parent(parent_pk: int, webhook_url: str, dry_run: bool = False):
 
     if parent_is_broken:
         if base_nodes:
-            # Get the last BaseCrystalWorkChain (by PK)
             for base in base_nodes:
                 label = base.label
                 if label and label.strip():

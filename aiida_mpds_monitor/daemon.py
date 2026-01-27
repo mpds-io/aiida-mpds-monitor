@@ -56,9 +56,40 @@ def send_webhook(webhook_url, payload, status):
         return False
 
 
-def get_node_status(node):
+def check_child_calculation(base_node, logger=None):
+    """Check if the last CrystalParallelCalculation child failed.
+    Returns True if the child is broken, False otherwise.
+    
+    Note: If CrystalParallelCalculation was retried, we check only the LAST attempt.
+    If the last attempt succeeded, we return False even if earlier attempts failed.
+    """
+    try:
+        called_nodes = base_node.called
+        crystal_calcs = [
+            n for n in called_nodes
+            if hasattr(n, 'process_label') and n.process_label == "CrystalParallelCalculation"
+        ]
+        if not crystal_calcs:
+            return False
+        
+        # Check the last (most recent) CrystalParallelCalculation by PK
+        # If the calculation was retried, we only care about the final attempt
+        last_calc = max(crystal_calcs, key=lambda n: n.pk)
+        is_broken = last_calc.is_failed or last_calc.is_excepted or last_calc.is_killed
+        if is_broken and logger:
+            logger.warning(f"BaseCrystalWorkChain {base_node.pk} finished but child CrystalParallelCalculation {last_calc.pk} failed")
+        return is_broken
+    except Exception:
+        return False
+
+
+def get_node_status(node, logger=None):
     state = node.process_state.value
     if state.lower() == "finished":
+        # Check if any child CrystalParallelCalculation failed
+        if check_child_calculation(node, logger=logger):
+            return "excepted"
+        
         excepted = node.is_excepted
         exit_code = node.exit_code.status if node.exit_code else 0
         if exit_code == 0 and not excepted:
@@ -89,7 +120,7 @@ def process_base_workchain(base_node, webhook_url, logger, no_marks=False):
     # Send webhook when state changes or when terminal state is reached
     already_finished = base_node.base.extras.get(EXTRA_FINISHED, False)
     if not already_finished:
-        status = get_node_status(base_node)
+        status = get_node_status(base_node, logger=logger)
         if send_webhook(webhook_url, label, status):
             if not no_marks:
                 base_node.set_extra(EXTRA_FINISHED, True)
@@ -135,7 +166,7 @@ def scan_and_process(config, logger, no_marks=False):
                     for base in base_nodes:
                         label = base.label
                         if label and label.strip():
-                            status = get_node_status(base)
+                            status = get_node_status(base, logger=logger)
                             if send_webhook(webhook_url, label.strip(), status):
                                 logger.warning(f"ERROR webhook sent for subtask '{label}' (status: {status}, parent {parent_node.pk} failed)")
                             else:
@@ -195,7 +226,7 @@ def scan_and_process_dry_run(config, logger):
                 for base in base_nodes:
                     label = base.label
                     if label and label.strip():
-                        status = get_node_status(base)
+                        status = get_node_status(base, logger=logger)
                         logger.info(f"[TEST] Would send webhook for '{label}' (status: {status}, parent failed)")
             logger.info(f"[TEST] Would mark parent {parent_node.pk} as processed")
             continue
@@ -205,7 +236,7 @@ def scan_and_process_dry_run(config, logger):
             if not label or not label.strip():
                 continue
             label = label.strip()
-            status = get_node_status(base_node)
+            status = get_node_status(base_node, logger=logger)
             logger.info(f"[TEST] Would send webhook for '{label}' (status: {status})")
 
         logger.info(f"[TEST] Would mark parent {parent_node.pk} as processed")

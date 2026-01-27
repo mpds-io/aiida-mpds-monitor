@@ -105,7 +105,7 @@ def submit_parent(parent_pk: int, webhook_url: str, webhook_key: str = "", dry_r
                     if dry_run:
                         print(f"[DRY-RUN] Parent {parent_pk} failed — would send: payload='{payload}', status='{status}'")
                     else:
-                        if send_webhook(webhook_url, payload, status, key=config.webhook_key if hasattr(config, 'webhook_key') else config.get('key', '')):
+                        if send_webhook(webhook_url, payload, status, key=webhook_key):
                             print(f"Sent ERROR webhook for last subtask '{payload}' ({status})")
                         else:
                             print(f"Failed to send webhook for '{payload}'", file=sys.stderr)
@@ -132,7 +132,7 @@ def submit_parent(parent_pk: int, webhook_url: str, webhook_key: str = "", dry_r
         if dry_run:
             print(f"[DRY-RUN] Would send: payload='{label}', status='{status}'")
         else:
-            if send_webhook(webhook_url, label, status, key=config.get('key', '')):
+            if send_webhook(webhook_url, label, status, key=webhook_key):
                 print(f"Sent webhook for '{label}' ({status})")
             else:
                 print(f"Failed to send webhook for '{label}'", file=sys.stderr)

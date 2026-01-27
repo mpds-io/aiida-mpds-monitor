@@ -9,14 +9,17 @@ from .config import load_config
 BASE_CRYSTAL_TYPE = "BaseCrystalWorkChain"
 
 
-def send_webhook(webhook_url, payload, status):
+def send_webhook(webhook_url, payload, status, key=None):
     import requests
     data = {"payload": payload, "status": status}
+    headers = {}
+    if key:
+        headers["Authorization"] = f"Bearer {key}"
     try:
-        response = requests.post(webhook_url, json=data, timeout=10)
+        response = requests.post(webhook_url, json=data, headers=headers, timeout=10)
         return response.status_code == 200
     except Exception as e:
-        print(f"Webhook error: {e}", file=sys.stderr)
+        print(f"Webhook error: {e}")
         return False
 
 
@@ -73,7 +76,7 @@ def get_node_status(node):
         return "excepted"
 
 
-def submit_parent(parent_pk: int, webhook_url: str, dry_run: bool = False):
+def submit_parent(parent_pk: int, webhook_url: str, webhook_key: str = "", dry_run: bool = False):
     parent_node = load_node(parent_pk)
 
     if not isinstance(parent_node, WorkChainNode):
@@ -102,7 +105,7 @@ def submit_parent(parent_pk: int, webhook_url: str, dry_run: bool = False):
                     if dry_run:
                         print(f"[DRY-RUN] Parent {parent_pk} failed — would send: payload='{payload}', status='{status}'")
                     else:
-                        if send_webhook(webhook_url, payload, status):
+                        if send_webhook(webhook_url, payload, status, key=config.webhook_key if hasattr(config, 'webhook_key') else config.get('key', '')):
                             print(f"Sent ERROR webhook for last subtask '{payload}' ({status})")
                         else:
                             print(f"Failed to send webhook for '{payload}'", file=sys.stderr)
@@ -129,7 +132,7 @@ def submit_parent(parent_pk: int, webhook_url: str, dry_run: bool = False):
         if dry_run:
             print(f"[DRY-RUN] Would send: payload='{label}', status='{status}'")
         else:
-            if send_webhook(webhook_url, label, status):
+            if send_webhook(webhook_url, label, status, key=config.get('key', '')):
                 print(f"Sent webhook for '{label}' ({status})")
             else:
                 print(f"Failed to send webhook for '{label}'", file=sys.stderr)
@@ -157,7 +160,7 @@ def main():
 
     logging.basicConfig(level=logging.INFO)
     try:
-        submit_parent(args.parent_pk, config.webhook_url, dry_run=args.dry_run)
+        submit_parent(args.parent_pk, config.webhook_url, webhook_key=config.get('key', ''), dry_run=args.dry_run)
     except Exception as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)

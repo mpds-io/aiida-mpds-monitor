@@ -46,11 +46,14 @@ def setup_logger(config):
     return logger
 
 
-def send_webhook(webhook_url, payload, status):
+def send_webhook(webhook_url, payload, status, key=None):
     import requests
     data = {"payload": payload, "status": status}
+    headers = {}
+    if key:
+        headers["Authorization"] = f"Bearer {key}"
     try:
-        response = requests.post(webhook_url, json=data, timeout=10)
+        response = requests.post(webhook_url, json=data, headers=headers, timeout=10)
         return response.status_code == 200
     except Exception:
         return False
@@ -109,7 +112,7 @@ def get_node_status(node, logger=None):
         return "excepted"
 
 
-def process_base_workchain(base_node, webhook_url, logger, no_marks=False):
+def process_base_workchain(base_node, webhook_url, webhook_key, logger, no_marks=False):
     label = base_node.label
     if not label or not label.strip():
         logger.debug(f"Skipping BaseCrystalWorkChain {base_node.pk} — empty label")
@@ -121,7 +124,7 @@ def process_base_workchain(base_node, webhook_url, logger, no_marks=False):
     already_finished = base_node.base.extras.get(EXTRA_FINISHED, False)
     if not already_finished:
         status = get_node_status(base_node, logger=logger)
-        if send_webhook(webhook_url, label, status):
+        if send_webhook(webhook_url, label, status, key=webhook_key):
             if not no_marks:
                 base_node.set_extra(EXTRA_FINISHED, True)
             logger.info(f"Webhook sent for '{label}' (status: {status})")
@@ -167,7 +170,7 @@ def scan_and_process(config, logger, no_marks=False):
                         label = base.label
                         if label and label.strip():
                             status = get_node_status(base, logger=logger)
-                            if send_webhook(webhook_url, label.strip(), status):
+                            if send_webhook(webhook_url, label.strip(), status, key=config.get("key", "")):
                                 logger.warning(f"ERROR webhook sent for subtask '{label}' (status: {status}, parent {parent_node.pk} failed)")
                             else:
                                 logger.error(f"Failed to send ERROR webhook for '{label}'")
@@ -185,7 +188,7 @@ def scan_and_process(config, logger, no_marks=False):
 
         # Normal processing
         for base_node in base_nodes:
-            process_base_workchain(base_node, webhook_url, logger, no_marks=no_marks)
+            process_base_workchain(base_node, webhook_url, config.get("key", ""), logger, no_marks=no_marks)
 
         if not no_marks:
             parent_node.set_extra(EXTRA_PARENT_PROCESSED, True)

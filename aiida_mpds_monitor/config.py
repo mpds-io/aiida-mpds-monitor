@@ -8,6 +8,7 @@ DEFAULT_CONFIG_PATH = Path("/etc/aiida_mpds_monitor/conf.yaml")
 
 DEFAULT_CONFIG = {
     "webhook_url": "http://localhost:8080",
+    "key": "",  # API key for webhook authentication
     "poll_interval": 30,
     "workchain_types": [
         "MPDSStructureWorkChain"

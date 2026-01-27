@@ -23,9 +23,19 @@ def send_webhook(webhook_url, payload, status):
 def get_node_status(node):
     state = node.process_state.value
     if state.lower() == "finished":
-        code = node.exit_code.status if node.exit_code else 0
-        return f"{state}-{code}"
-    return state
+        exit_code = node.exit_code.status if node.exit_code else 0
+        if exit_code == 0:
+            return "finished"
+        else:
+            return f"excepted-{exit_code}"
+    elif state.lower() in ["running", "submitting", "created"]:
+        return "waiting"
+    elif state.lower() in ["excepted"]:
+        exit_code = node.exit_code.status if node.exit_code else 1
+        return f"excepted-{exit_code}"
+    else:
+        # For any other error states
+        return "excepted"
 
 
 def submit_parent(parent_pk: int, webhook_url: str, dry_run: bool = False):
@@ -53,13 +63,13 @@ def submit_parent(parent_pk: int, webhook_url: str, dry_run: bool = False):
             for base in base_nodes:
                 label = base.label
                 if label and label.strip():
-                    status = "finished-500"
+                    status = get_node_status(base)
                     payload = label.strip()
                     if dry_run:
                         print(f"[DRY-RUN] Parent {parent_pk} failed — would send: payload='{payload}', status='{status}'")
                     else:
                         if send_webhook(webhook_url, payload, status):
-                            print(f"Sent ERROR webhook for last subtask '{payload}' (parent failed)")
+                            print(f"Sent ERROR webhook for last subtask '{payload}' ({status})")
                         else:
                             print(f"Failed to send webhook for '{payload}'", file=sys.stderr)
                 else:
@@ -80,13 +90,7 @@ def submit_parent(parent_pk: int, webhook_url: str, dry_run: bool = False):
             continue
 
         label = label.strip()
-
-        if base_node.is_finished:
-            status = get_node_status(base_node)
-        elif base_node.is_excepted or base_node.is_killed or base_node.is_terminated:
-            status = "finished-400"
-        else:
-            status = "progress"
+        status = get_node_status(base_node)
 
         if dry_run:
             print(f"[DRY-RUN] Would send: payload='{label}', status='{status}'")

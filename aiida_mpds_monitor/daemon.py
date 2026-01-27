@@ -59,9 +59,20 @@ def send_webhook(webhook_url, payload, status):
 def get_node_status(node):
     state = node.process_state.value
     if state.lower() == "finished":
-        code = node.exit_code.status if node.exit_code else 0
-        return f"{state}-{code}"
-    return state
+        # Check exit code to determine if it's a success or error
+        exit_code = node.exit_code.status if node.exit_code else 0
+        if exit_code == 0:
+            return "finished"
+        else:
+            return f"excepted-{exit_code}"
+    elif state.lower() in ["running", "submitting", "created"]:
+        return "waiting"
+    elif state.lower() in ["excepted"]:
+        exit_code = node.exit_code.status if node.exit_code else 1
+        return f"excepted-{exit_code}"
+    else:
+        # For any other error states
+        return "excepted"
 
 
 def process_base_workchain(base_node, webhook_url, logger, no_marks=False):
@@ -72,28 +83,16 @@ def process_base_workchain(base_node, webhook_url, logger, no_marks=False):
 
     label = label.strip()
 
-    # === START ===
-    already_started = base_node.base.extras.get(EXTRA_STARTED, False)
-    if not already_started:
-        if base_node.process_state.value != "created":
-            if send_webhook(webhook_url, label, "started"):
-                if not no_marks:
-                    base_node.set_extra(EXTRA_STARTED, True)
-                logger.info(f"START webhook sent for '{label}' ({base_node.pk})")
-            else:
-                logger.warning(f"Failed to send START webhook for '{label}'")
-
-    # === FINISH ===
+    # Send webhook when state changes or when terminal state is reached
     already_finished = base_node.base.extras.get(EXTRA_FINISHED, False)
     if not already_finished:
-        if base_node.is_finished:
-            status = get_node_status(base_node)
-            if send_webhook(webhook_url, label, status):
-                if not no_marks:
-                    base_node.set_extra(EXTRA_FINISHED, True)
-                logger.info(f"FINISH webhook sent for '{label}' ({status})")
-            else:
-                logger.warning(f"Failed to send FINISH webhook for '{label}'")
+        status = get_node_status(base_node)
+        if send_webhook(webhook_url, label, status):
+            if not no_marks:
+                base_node.set_extra(EXTRA_FINISHED, True)
+            logger.info(f"Webhook sent for '{label}' (status: {status})")
+        else:
+            logger.warning(f"Failed to send webhook for '{label}'")
 
 
 def scan_and_process(config, logger, no_marks=False):
@@ -129,13 +128,13 @@ def scan_and_process(config, logger, no_marks=False):
         if parent_is_broken:
             if not parent_node.base.extras.get(EXTRA_PARENT_ERROR_SENT, False):
                 if base_nodes:
-                    # If parent is broken send finished-500 for each base workchain
+                    # If parent is broken, send actual status for each base workchain
                     for base in base_nodes:
                         label = base.label
                         if label and label.strip():
-                            status = "finished-500"
+                            status = get_node_status(base)
                             if send_webhook(webhook_url, label.strip(), status):
-                                logger.warning(f"ERROR webhook sent for subtask '{label}' (parent {parent_node.pk} failed)")
+                                logger.warning(f"ERROR webhook sent for subtask '{label}' (status: {status}, parent {parent_node.pk} failed)")
                             else:
                                 logger.error(f"Failed to send ERROR webhook for '{label}'")
                         # else: skip empty label
@@ -193,7 +192,8 @@ def scan_and_process_dry_run(config, logger):
                 for base in base_nodes:
                     label = base.label
                     if label and label.strip():
-                        logger.info(f"[TEST] Would send ERROR webhook for '{label}' (parent failed)")
+                        status = get_node_status(base)
+                        logger.info(f"[TEST] Would send webhook for '{label}' (status: {status}, parent failed)")
             logger.info(f"[TEST] Would mark parent {parent_node.pk} as processed")
             continue
 
@@ -202,11 +202,8 @@ def scan_and_process_dry_run(config, logger):
             if not label or not label.strip():
                 continue
             label = label.strip()
-            if base_node.process_state.value != "created":
-                logger.info(f"[TEST] Would send START webhook for '{label}'")
-            if base_node.is_finished:
-                status = get_node_status(base_node)
-                logger.info(f"[TEST] Would send FINISH webhook for '{label}' ({status})")
+            status = get_node_status(base_node)
+            logger.info(f"[TEST] Would send webhook for '{label}' (status: {status})")
 
         logger.info(f"[TEST] Would mark parent {parent_node.pk} as processed")
 

@@ -16,6 +16,8 @@ class WebhookHandler(BaseHTTPRequestHandler):
         # Console output
         print("\n" + "="*50)
         print("Webhook accepted:")
+        print(f"   Data:  {data}")
+        print("="*50 + "\n")
         print(f"   Payload: {payload}")
         print(f"   Status:  {status}")
         print("="*50 + "\n")

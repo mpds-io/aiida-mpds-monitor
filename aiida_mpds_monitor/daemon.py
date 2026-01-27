@@ -53,7 +53,7 @@ def send_webhook(webhook_url, payload, status, key=None):
     if key:
         headers["Authorization"] = f"Bearer {key}"
     try:
-        response = requests.post(webhook_url, json=data, headers=headers, timeout=10)
+        response = requests.post(webhook_url, data=data, headers=headers, timeout=10)
         return response.status_code == 200
     except Exception:
         return False

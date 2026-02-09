@@ -1,5 +1,6 @@
 # stub_server.py
 from http.server import HTTPServer, BaseHTTPRequestHandler
+from urllib.parse import parse_qs
 import json
 
 class WebhookHandler(BaseHTTPRequestHandler):
@@ -7,7 +8,20 @@ class WebhookHandler(BaseHTTPRequestHandler):
         # Parse request body
         content_length = int(self.headers.get('Content-Length', 0))
         body = self.rfile.read(content_length)
-        data = json.loads(body.decode('utf-8'))
+        
+        # Try to parse as JSON first, then as form data
+        data = {}
+        try:
+            data = json.loads(body.decode('utf-8'))
+        except (json.JSONDecodeError, ValueError):
+            # If not JSON, try to parse as form data
+            try:
+                parsed = parse_qs(body.decode('utf-8'))
+                # Convert lists to strings (form data comes as lists)
+                data = {k: v[0] if v else '' for k, v in parsed.items()}
+            except Exception:
+                # If all parsing fails, try to get raw data
+                data = {"raw": body.decode('utf-8', errors='replace')}
 
         # get data
         payload = data.get('payload', '')

@@ -5,10 +5,9 @@ import logging.handlers
 import time
 from aiida import load_profile
 from aiida.orm import QueryBuilder, WorkChainNode
-from .config import load_config
+from .config import load_config, get_auth_key
 from .webhook import send_webhook
 from .status import (
-    BASE_CRYSTAL_TYPE,
     EXTRA_FINISHED,
     EXTRA_PARENT_PROCESSED,
     EXTRA_PARENT_ERROR_SENT,
@@ -48,38 +47,46 @@ def setup_logger(config):
 
 
 def process_base_workchain(
-    base_node, webhook_url, webhook_key, logger, no_marks=False
+    base_node, webhook_url, webhook_key, logger, hierarchy, parent_label, no_commit=False
 ):
     label = base_node.label
     if not label or not label.strip():
         logger.debug(
-            f"Skipping BaseCrystalWorkChain {base_node.pk} — empty label"
+            f"Skipping {base_node.process_label} {base_node.pk} — empty label"
         )
         return
 
     label = label.strip()
 
+    # Get grandchild types to check from hierarchy
+    node_type = base_node.process_label
+    grandchild_types = hierarchy.get(parent_label, {}).get(node_type, [])
+    
     # Send webhook when state changes or when terminal state is reached
     already_finished = base_node.base.extras.get(EXTRA_FINISHED, False)
     if not already_finished:
-        status = get_node_status(base_node, logger=logger)
+        status = get_node_status(base_node, child_types=grandchild_types, logger=logger)
         if send_webhook(webhook_url, label, status, key=webhook_key):
-            if not no_marks:
+            if not no_commit:
                 base_node.set_extra(EXTRA_FINISHED, True)
             logger.info(f"Webhook sent for '{label}' (status: {status})")
         else:
             logger.warning(f"Failed to send webhook for '{label}'")
 
 
-def scan_and_process(config, logger, no_marks=False):
+def scan_and_process(config, logger, no_commit=False):
     webhook_url = config.webhook_url
+    
+    # Get parent workchain types from hierarchy keys
+    hierarchy = config.get("workchain_hierarchy", {})
+    workchain_types = list(hierarchy.keys())
 
     # Request ALL parent nodes of the specified type that have not yet been processed.
     # Including those that failed!
     qb = QueryBuilder()
     qb.append(
         WorkChainNode,
-        filters={"attributes.process_label": {"in": config.workchain_types}},
+        filters={"attributes.process_label": {"in": workchain_types}},
         tag="parent",
     )
     # We process only those that are not yet marked as processed
@@ -96,11 +103,15 @@ def scan_and_process(config, logger, no_marks=False):
         )
 
         called_nodes = parent_node.called
+        # Get child workchain types to search for from hierarchy
+        parent_label = parent_node.process_label
+        child_types = list(hierarchy.get(parent_label, {}).keys())
+        
         base_nodes = [
             n
             for n in called_nodes
             if isinstance(n, WorkChainNode)
-            and n.process_label == BASE_CRYSTAL_TYPE
+            and n.process_label in child_types
         ]
 
         if parent_is_broken:
@@ -110,12 +121,15 @@ def scan_and_process(config, logger, no_marks=False):
                     for base in base_nodes:
                         label = base.label
                         if label and label.strip():
-                            status = get_node_status(base, logger=logger)
+                            # Get grandchild types to check from hierarchy
+                            parent_type = base.process_label
+                            grandchild_types = hierarchy.get(parent_label, {}).get(parent_type, [])
+                            status = get_node_status(base, child_types=grandchild_types, logger=logger)
                             if send_webhook(
                                 webhook_url,
                                 label.strip(),
                                 status,
-                                key=config.get("key", ""),
+                                key=get_auth_key(),
                             ):
                                 logger.warning(
                                     f"ERROR webhook sent for subtask '{label}' (status: {status}, parent {parent_node.pk} failed)"
@@ -126,15 +140,15 @@ def scan_and_process(config, logger, no_marks=False):
                                 )
                         # else: skip empty label
                     # Mark that the error has been handled (if allowed)
-                    if not no_marks:
+                    if not no_commit:
                         parent_node.set_extra(EXTRA_PARENT_ERROR_SENT, True)
                 else:
                     logger.debug(
-                        f"Parent {parent_node.pk} failed but has no BaseCrystalWorkChain — nothing to report"
+                        f"Parent {parent_node.pk} failed but has no children — nothing to report"
                     )
 
             # Mark the parent as processed (if allowed)
-            if not no_marks:
+            if not no_commit:
                 parent_node.set_extra(EXTRA_PARENT_PROCESSED, True)
             continue
 
@@ -143,12 +157,14 @@ def scan_and_process(config, logger, no_marks=False):
             process_base_workchain(
                 base_node,
                 webhook_url,
-                config.get("key", ""),
+                get_auth_key(),
                 logger,
-                no_marks=no_marks,
+                hierarchy,
+                parent_label,
+                no_commit=no_commit,
             )
 
-        if not no_marks:
+        if not no_commit:
             parent_node.set_extra(EXTRA_PARENT_PROCESSED, True)
             logger.info(f"Parent {parent_node.pk} marked as processed")
         else:
@@ -157,10 +173,14 @@ def scan_and_process(config, logger, no_marks=False):
 
 # For dry-run testing
 def scan_and_process_dry_run(config, logger):
+    # Get parent workchain types from hierarchy keys
+    hierarchy = config.get("workchain_hierarchy", {})
+    workchain_types = list(hierarchy.keys())
+    
     qb = QueryBuilder()
     qb.append(
         WorkChainNode,
-        filters={"attributes.process_label": {"in": config.workchain_types}},
+        filters={"attributes.process_label": {"in": workchain_types}},
         tag="parent",
     )
     qb.add_filter("parent", {"extras": {"!has_key": EXTRA_PARENT_PROCESSED}})
@@ -176,11 +196,15 @@ def scan_and_process_dry_run(config, logger):
         )
 
         called_nodes = parent_node.called
+        # Get child workchain types to search for from hierarchy
+        parent_label = parent_node.process_label
+        child_types = list(hierarchy.get(parent_label, {}).keys())
+        
         base_nodes = [
             n
             for n in called_nodes
             if isinstance(n, WorkChainNode)
-            and n.process_label == BASE_CRYSTAL_TYPE
+            and n.process_label in child_types
         ]
 
         if parent_is_broken:
@@ -188,7 +212,10 @@ def scan_and_process_dry_run(config, logger):
                 for base in base_nodes:
                     label = base.label
                     if label and label.strip():
-                        status = get_node_status(base, logger=logger)
+                        # Get grandchild types to check from hierarchy
+                        parent_type = base.process_label
+                        grandchild_types = hierarchy.get(parent_label, {}).get(parent_type, [])
+                        status = get_node_status(base, child_types=grandchild_types, logger=logger)
                         logger.info(
                             f"[TEST] Would send webhook for '{label}' (status: {status}, parent failed)"
                         )
@@ -202,7 +229,10 @@ def scan_and_process_dry_run(config, logger):
             if not label or not label.strip():
                 continue
             label = label.strip()
-            status = get_node_status(base_node, logger=logger)
+            # Get grandchild types to check from hierarchy
+            parent_type = base_node.process_label
+            grandchild_types = hierarchy.get(parent_label, {}).get(parent_type, [])
+            status = get_node_status(base_node, child_types=grandchild_types, logger=logger)
             logger.info(
                 f"[TEST] Would send webhook for '{label}' (status: {status})"
             )
@@ -250,7 +280,8 @@ def main():
     logger.info(f"Webhook URL: {config.webhook_url}")
     logger.info(f"Poll interval: {config.poll_interval}s")
     logger.info(f"Log file: {config.log_file}")
-    logger.info(f"Monitoring workchains: {config.workchain_types}")
+    hierarchy = config.get("workchain_hierarchy", {})
+    logger.info(f"Monitoring workchains: {list(hierarchy.keys())}")
 
     while True:
         try:

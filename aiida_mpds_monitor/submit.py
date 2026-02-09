@@ -4,10 +4,9 @@ import sys
 import logging
 from aiida import load_profile
 from aiida.orm import load_node, WorkChainNode
-from .config import load_config
+from .config import load_config, get_auth_key
 from .webhook import send_webhook
 from .status import (
-    BASE_CRYSTAL_TYPE,
     get_node_status,
 )
 
@@ -17,18 +16,26 @@ def submit_parent(
     webhook_url: str,
     webhook_key: str = "",
     dry_run: bool = False,
+    config=None,
 ):
     parent_node = load_node(parent_pk)
 
     if not isinstance(parent_node, WorkChainNode):
         raise ValueError(f"Node {parent_pk} is not a WorkChain")
 
+    # Get hierarchy
+    hierarchy = config.get("workchain_hierarchy", {}) if config else {}
+    
+    # Get child workchain types to search for from hierarchy
+    parent_label = parent_node.process_label
+    child_types = list(hierarchy.get(parent_label, {}).keys())
+
     called_nodes = parent_node.called
     base_nodes = [
         n
         for n in called_nodes
         if isinstance(n, WorkChainNode)
-        and n.process_label == BASE_CRYSTAL_TYPE
+        and n.process_label in child_types
     ]
 
     # Check if parent is in a failed state
@@ -43,7 +50,10 @@ def submit_parent(
             for base in base_nodes:
                 label = base.label
                 if label and label.strip():
-                    status = get_node_status(base)
+                    # Get grandchild types to check from hierarchy
+                    node_type = base.process_label
+                    grandchild_types = hierarchy.get(parent_label, {}).get(node_type, [])
+                    status = get_node_status(base, child_types=grandchild_types)
                     payload = label.strip()
                     if dry_run:
                         print(
@@ -63,17 +73,17 @@ def submit_parent(
                             )
                 else:
                     print(
-                        f"Parent {parent_pk} failed, but last BaseCrystalWorkChain has no label — skipping"
+                        f"Parent {parent_pk} failed, but child workchain has no label — skipping"
                     )
         else:
             print(
-                f"Parent {parent_pk} failed but launched no BaseCrystalWorkChain — nothing to report"
+                f"Parent {parent_pk} failed but launched no child workchains — nothing to report"
             )
         return
 
     # Normal case: parent is OK — process all subnodes
     if not base_nodes:
-        print(f"No BaseCrystalWorkChain found under parent {parent_pk}")
+        print(f"No child workchains found under parent {parent_pk}")
         return
 
     for base_node in base_nodes:
@@ -83,7 +93,10 @@ def submit_parent(
             continue
 
         label = label.strip()
-        status = get_node_status(base_node)
+        # Get grandchild types to check from hierarchy
+        node_type = base_node.process_label
+        grandchild_types = hierarchy.get(parent_label, {}).get(node_type, [])
+        status = get_node_status(base_node, child_types=grandchild_types)
 
         if dry_run:
             print(
@@ -117,8 +130,9 @@ def main():
         submit_parent(
             args.parent_pk,
             config.webhook_url,
-            webhook_key=config.get("key", ""),
+            webhook_key=get_auth_key(),
             dry_run=args.dry_run,
+            config=config,
         )
     except Exception as e:
         print(f"Error: {e}", file=sys.stderr)

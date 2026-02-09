@@ -13,7 +13,9 @@ EXTRA_STARTED = "webhook_started"
 EXTRA_FINISHED = "webhook_finished"
 EXTRA_PARENT_PROCESSED = "webhook_parent_processed"
 EXTRA_PARENT_ERROR_SENT = "webhook_parent_error_sent"
-
+STATUS_EXC = "excepted"
+STATUS_DONE = "finished"
+STATUS_WAITING = "waiting"
 
 def setup_logger(config):
     logger = logging.getLogger("aiida_mpds_monitor")
@@ -91,25 +93,25 @@ def get_node_status(node, logger=None):
     if state.lower() == "finished":
         # Check if any child CrystalParallelCalculation failed
         if check_child_calculation(node, logger=logger):
-            return "excepted"
+            return STATUS_EXC 
         
         excepted = node.is_excepted
         exit_code = node.exit_code.status if node.exit_code else 0
         if exit_code == 0 and not excepted:
-            return "finished"
+            return STATUS_DONE
         # if node broke due to unexpected error (in code, for example)
         if excepted and not node.is_failed:
-            return "excepted"
+            return STATUS_EXC 
         else:
             return f"excepted-{exit_code}"
     elif state.lower() in ["running", "submitting", "created"]:
-        return "waiting"
+        return STATUS_WAITING
     elif state.lower() in ["excepted"]:
         exit_code = node.exit_code.status if node.exit_code else 1
-        return f"excepted-{exit_code}"
+        return f"{STATUS_EXC}-{exit_code}"
     else:
         # For any other error states
-        return "excepted"
+        return STATUS_EXC
 
 
 def process_base_workchain(base_node, webhook_url, webhook_key, logger, no_marks=False):

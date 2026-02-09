@@ -7,7 +7,9 @@ from aiida.orm import load_node, WorkChainNode
 from .config import load_config
 
 BASE_CRYSTAL_TYPE = "BaseCrystalWorkChain"
-
+STATUS_EXC = "excepted"
+STATUS_DONE = "finished"
+STATUS_WAITING = "waiting"
 
 def send_webhook(webhook_url, payload, status, key=None):
     import requests
@@ -55,25 +57,25 @@ def get_node_status(node):
     if state.lower() == "finished":
         # Check if any child CrystalParallelCalculation failed
         if check_child_calculation(node):
-            return "excepted"
+            return STATUS_EXC
         
         excepted = node.is_excepted
         exit_code = node.exit_code.status if node.exit_code else 0
         if not excepted and exit_code == 0:
-            return "finished"
+            return STATUS_DONE
         # if node broke due to unexpected error (in code, for example)
         if excepted and not node.is_failed:
-            return "excepted"
+            return STATUS_EXC
         else:
-            return f"excepted-{exit_code}"
+            return f"{STATUS_EXC}-{exit_code}"
     elif state.lower() in ["running", "submitting", "created"]:
-        return "waiting"
+        return STATUS_WAITING
     elif state.lower() in ["excepted"]:
         exit_code = node.exit_code.status if node.exit_code else 1
-        return f"excepted-{exit_code}"
+        return f"{STATUS_EXC}-{exit_code}"
     else:
         # For any other error states
-        return "excepted"
+        return STATUS_EXC
 
 
 def submit_parent(parent_pk: int, webhook_url: str, webhook_key: str = "", dry_run: bool = False):

@@ -281,3 +281,152 @@ class TestGetNodeStatus:
         result = get_node_status(node)
 
         assert result == STATUS_EXC
+
+
+class TestCheckChildCalculationWithCustomTypes:
+    """Test cases for check_child_calculation with custom child types."""
+
+    def test_custom_child_type_found_failed(self):
+        """Test with custom child type that failed."""
+        child_node = MagicMock()
+        child_node.process_label = "CustomChildType"
+        child_node.pk = 1
+        child_node.is_failed = True
+        child_node.is_excepted = False
+        child_node.is_killed = False
+
+        base_node = MagicMock()
+        base_node.pk = 100
+        base_node.called = [child_node]
+
+        result = check_child_calculation(
+            base_node, child_types=["CustomChildType"]
+        )
+
+        assert result is True
+
+    def test_custom_child_type_not_found_when_different_type_exists(self):
+        """Test when different child type exists but we're looking for another."""
+        child_node = MagicMock()
+        child_node.process_label = "SomeOtherType"
+        child_node.pk = 1
+        child_node.is_failed = True
+        child_node.is_excepted = False
+        child_node.is_killed = False
+
+        base_node = MagicMock()
+        base_node.called = [child_node]
+
+        result = check_child_calculation(
+            base_node, child_types=["CustomChildType"]
+        )
+
+        assert result is False
+
+    def test_multiple_custom_child_types(self):
+        """Test with multiple custom child types."""
+        child1 = MagicMock()
+        child1.process_label = "Type1"
+        child1.pk = 1
+        child1.is_failed = False
+        child1.is_excepted = False
+        child1.is_killed = False
+
+        child2 = MagicMock()
+        child2.process_label = "Type2"
+        child2.pk = 2
+        child2.is_failed = True
+        child2.is_excepted = False
+        child2.is_killed = False
+
+        base_node = MagicMock()
+        base_node.pk = 100
+        base_node.called = [child1, child2]
+
+        # Looking for both types - should find Type2 as failed
+        result = check_child_calculation(
+            base_node, child_types=["Type1", "Type2"]
+        )
+
+        assert result is True
+
+    def test_custom_child_type_with_empty_list(self):
+        """Test with empty child_types list."""
+        child_node = MagicMock()
+        child_node.process_label = "CrystalParallelCalculation"
+        child_node.pk = 1
+        child_node.is_failed = True
+        child_node.is_excepted = False
+        child_node.is_killed = False
+
+        base_node = MagicMock()
+        base_node.called = [child_node]
+
+        # Should return False because we're not looking for this type
+        result = check_child_calculation(base_node, child_types=[])
+
+        assert result is False
+
+
+class TestGetNodeStatusWithCustomTypes:
+    """Test cases for get_node_status with custom child types."""
+
+    def test_finished_with_custom_child_type_failed(self):
+        """Test finished node with custom child type failed."""
+        child_node = MagicMock()
+        child_node.process_label = "CustomCalculation"
+        child_node.pk = 1
+        child_node.is_failed = True
+        child_node.is_excepted = False
+        child_node.is_killed = False
+
+        node = MagicMock()
+        node.process_state.value = "finished"
+        node.is_excepted = False
+        node.exit_code.status = 0
+        node.pk = 100
+        node.called = [child_node]
+
+        result = get_node_status(node, child_types=["CustomCalculation"])
+
+        assert result == STATUS_EXC
+
+    def test_finished_with_custom_child_type_succeeded(self):
+        """Test finished node with custom child type that succeeded."""
+        child_node = MagicMock()
+        child_node.process_label = "CustomCalculation"
+        child_node.pk = 1
+        child_node.is_failed = False
+        child_node.is_excepted = False
+        child_node.is_killed = False
+
+        node = MagicMock()
+        node.process_state.value = "finished"
+        node.is_excepted = False
+        node.exit_code.status = 0
+        node.pk = 100
+        node.called = [child_node]
+
+        result = get_node_status(node, child_types=["CustomCalculation"])
+
+        assert result == STATUS_DONE
+
+    def test_default_child_type_used_when_none_provided(self):
+        """Test that default CrystalParallelCalculation is used when child_types is None."""
+        child_node = MagicMock()
+        child_node.process_label = "CrystalParallelCalculation"
+        child_node.pk = 1
+        child_node.is_failed = True
+        child_node.is_excepted = False
+        child_node.is_killed = False
+
+        node = MagicMock()
+        node.process_state.value = "finished"
+        node.is_excepted = False
+        node.exit_code.status = 0
+        node.pk = 100
+        node.called = [child_node]
+
+        result = get_node_status(node, child_types=None)
+
+        assert result == STATUS_EXC

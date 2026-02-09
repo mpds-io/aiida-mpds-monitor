@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "aiida-mpds-monitor"
-version = "0.5.2"
+version = "0.7.1"
 description = "AiiDA webhook monitor for MPDS workflows"
 readme = "README.md"
 license = { text = "MIT" }

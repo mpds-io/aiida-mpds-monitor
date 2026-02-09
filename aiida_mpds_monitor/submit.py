@@ -1,14 +1,15 @@
-# aiida_mpds_monitor/submit.py
 import argparse
-import sys
 import logging
+import sys
+
 from aiida import load_profile
-from aiida.orm import load_node, WorkChainNode
-from .config import load_config, get_auth_key
-from .webhook import send_webhook
+from aiida.orm import WorkChainNode, load_node
+
+from .config import get_auth_key, load_config
 from .status import (
     get_node_status,
 )
+from .webhook import send_webhook
 
 
 def submit_parent(
@@ -25,7 +26,7 @@ def submit_parent(
 
     # Get hierarchy
     hierarchy = config.get("workchain_hierarchy", {}) if config else {}
-    
+
     # Get child workchain types to search for from hierarchy
     parent_label = parent_node.process_label
     child_types = list(hierarchy.get(parent_label, {}).keys())
@@ -34,8 +35,7 @@ def submit_parent(
     base_nodes = [
         n
         for n in called_nodes
-        if isinstance(n, WorkChainNode)
-        and n.process_label in child_types
+        if isinstance(n, WorkChainNode) and n.process_label in child_types
     ]
 
     # Check if parent is in a failed state
@@ -52,8 +52,12 @@ def submit_parent(
                 if label and label.strip():
                     # Get grandchild types to check from hierarchy
                     node_type = base.process_label
-                    grandchild_types = hierarchy.get(parent_label, {}).get(node_type, [])
-                    status = get_node_status(base, child_types=grandchild_types)
+                    grandchild_types = hierarchy.get(parent_label, {}).get(
+                        node_type, []
+                    )
+                    status = get_node_status(
+                        base, child_types=grandchild_types
+                    )
                     payload = label.strip()
                     if dry_run:
                         print(

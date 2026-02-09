@@ -1,18 +1,20 @@
-import os
-import sys
 import logging
 import logging.handlers
+import os
+import sys
 import time
+
 from aiida import load_profile
 from aiida.orm import QueryBuilder, WorkChainNode
-from .config import load_config, get_auth_key
-from .webhook import send_webhook
+
+from .config import get_auth_key, load_config
 from .status import (
     EXTRA_FINISHED,
-    EXTRA_PARENT_PROCESSED,
     EXTRA_PARENT_ERROR_SENT,
+    EXTRA_PARENT_PROCESSED,
     get_node_status,
 )
+from .webhook import send_webhook
 
 
 def setup_logger(config):
@@ -47,7 +49,13 @@ def setup_logger(config):
 
 
 def process_base_workchain(
-    base_node, webhook_url, webhook_key, logger, hierarchy, parent_label, no_commit=False
+    base_node,
+    webhook_url,
+    webhook_key,
+    logger,
+    hierarchy,
+    parent_label,
+    no_commit=False,
 ):
     label = base_node.label
     if not label or not label.strip():
@@ -61,11 +69,13 @@ def process_base_workchain(
     # Get grandchild types to check from hierarchy
     node_type = base_node.process_label
     grandchild_types = hierarchy.get(parent_label, {}).get(node_type, [])
-    
+
     # Send webhook when state changes or when terminal state is reached
     already_finished = base_node.base.extras.get(EXTRA_FINISHED, False)
     if not already_finished:
-        status = get_node_status(base_node, child_types=grandchild_types, logger=logger)
+        status = get_node_status(
+            base_node, child_types=grandchild_types, logger=logger
+        )
         if send_webhook(webhook_url, label, status, key=webhook_key):
             if not no_commit:
                 base_node.set_extra(EXTRA_FINISHED, True)
@@ -76,7 +86,7 @@ def process_base_workchain(
 
 def scan_and_process(config, logger, no_commit=False):
     webhook_url = config.webhook_url
-    
+
     # Get parent workchain types from hierarchy keys
     hierarchy = config.get("workchain_hierarchy", {})
     workchain_types = list(hierarchy.keys())
@@ -106,12 +116,11 @@ def scan_and_process(config, logger, no_commit=False):
         # Get child workchain types to search for from hierarchy
         parent_label = parent_node.process_label
         child_types = list(hierarchy.get(parent_label, {}).keys())
-        
+
         base_nodes = [
             n
             for n in called_nodes
-            if isinstance(n, WorkChainNode)
-            and n.process_label in child_types
+            if isinstance(n, WorkChainNode) and n.process_label in child_types
         ]
 
         if parent_is_broken:
@@ -123,8 +132,14 @@ def scan_and_process(config, logger, no_commit=False):
                         if label and label.strip():
                             # Get grandchild types to check from hierarchy
                             parent_type = base.process_label
-                            grandchild_types = hierarchy.get(parent_label, {}).get(parent_type, [])
-                            status = get_node_status(base, child_types=grandchild_types, logger=logger)
+                            grandchild_types = hierarchy.get(
+                                parent_label, {}
+                            ).get(parent_type, [])
+                            status = get_node_status(
+                                base,
+                                child_types=grandchild_types,
+                                logger=logger,
+                            )
                             if send_webhook(
                                 webhook_url,
                                 label.strip(),
@@ -176,7 +191,7 @@ def scan_and_process_dry_run(config, logger):
     # Get parent workchain types from hierarchy keys
     hierarchy = config.get("workchain_hierarchy", {})
     workchain_types = list(hierarchy.keys())
-    
+
     qb = QueryBuilder()
     qb.append(
         WorkChainNode,
@@ -199,12 +214,11 @@ def scan_and_process_dry_run(config, logger):
         # Get child workchain types to search for from hierarchy
         parent_label = parent_node.process_label
         child_types = list(hierarchy.get(parent_label, {}).keys())
-        
+
         base_nodes = [
             n
             for n in called_nodes
-            if isinstance(n, WorkChainNode)
-            and n.process_label in child_types
+            if isinstance(n, WorkChainNode) and n.process_label in child_types
         ]
 
         if parent_is_broken:
@@ -214,8 +228,12 @@ def scan_and_process_dry_run(config, logger):
                     if label and label.strip():
                         # Get grandchild types to check from hierarchy
                         parent_type = base.process_label
-                        grandchild_types = hierarchy.get(parent_label, {}).get(parent_type, [])
-                        status = get_node_status(base, child_types=grandchild_types, logger=logger)
+                        grandchild_types = hierarchy.get(parent_label, {}).get(
+                            parent_type, []
+                        )
+                        status = get_node_status(
+                            base, child_types=grandchild_types, logger=logger
+                        )
                         logger.info(
                             f"[TEST] Would send webhook for '{label}' (status: {status}, parent failed)"
                         )
@@ -231,8 +249,12 @@ def scan_and_process_dry_run(config, logger):
             label = label.strip()
             # Get grandchild types to check from hierarchy
             parent_type = base_node.process_label
-            grandchild_types = hierarchy.get(parent_label, {}).get(parent_type, [])
-            status = get_node_status(base_node, child_types=grandchild_types, logger=logger)
+            grandchild_types = hierarchy.get(parent_label, {}).get(
+                parent_type, []
+            )
+            status = get_node_status(
+                base_node, child_types=grandchild_types, logger=logger
+            )
             logger.info(
                 f"[TEST] Would send webhook for '{label}' (status: {status})"
             )
@@ -262,7 +284,9 @@ def main():
     no_commit = args.no_commit
 
     if dry_run and no_commit:
-        print("--dry-run and --no-commit are mutually exclusive. Using --test.")
+        print(
+            "--dry-run and --no-commit are mutually exclusive. Using --test."
+        )
         no_commit = False
 
     load_profile()

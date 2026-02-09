@@ -220,20 +220,20 @@ def main():
         help="Dry-run: show what would be done, but DO NOT send webhooks or set marks.",
     )
     parser.add_argument(
-        "--no-marks",
+        "--no-commit",
         action="store_true",
         help="Send webhooks, but DO NOT set any extras on nodes (useful for recovery or one-off runs).",
     )
     args = parser.parse_args()
 
     # In --test mode, no marks are set and webhooks are not sent.
-    # In --no-marks mode, webhooks are sent, but no marks are set.
+    # In --no-commit mode, webhooks are sent, but no extras are set on nodes.
     dry_run = args.dry_run
-    no_marks = args.no_marks
+    no_commit = args.no_commit
 
-    if dry_run and no_marks:
-        print("--dry-run and --no-marks are mutually exclusive. Using --test.")
-        no_marks = False
+    if dry_run and no_commit:
+        print("--dry-run and --no-commit are mutually exclusive. Using --test.")
+        no_commit = False
 
     load_profile()
     config = load_config()
@@ -241,8 +241,8 @@ def main():
 
     if dry_run:
         mode = "TEST (dry-run, no webhooks, no marks)"
-    elif no_marks:
-        mode = "NO-MARKS (webhooks sent, no extras set)"
+    elif no_commit:
+        mode = "NO-COMMIT (webhooks sent, no extras set)"
     else:
         mode = "NORMAL"
 
@@ -258,7 +258,7 @@ def main():
                 # In test mode, we emulate the behavior without sending
                 scan_and_process_dry_run(config, logger)
             else:
-                scan_and_process(config, logger, no_marks=no_marks)
+                scan_and_process(config, logger, no_commit=no_commit)
         except KeyboardInterrupt:
             logger.info("Shutting down gracefully...")
             break

@@ -1,6 +1,6 @@
 # aiida-mpds-monitor
 
-A lightweight daemon and CLI tool to monitor AiiDA workflows (e.g., MPDSStructureWorkChain) and automatically send webhooks when child BaseCrystalWorkChain calculations start or finish. Designed for integration with external job-tracking systems (e.g., MPDS backend).
+A lightweight daemon and CLI tool to monitor AiiDA workflows and automatically send webhooks when configured child workchains complete. Designed for integration with external job-tracking systems (e.g., MPDS backend). Fully configurable hierarchy of parent -> child -> grandchild workchain monitoring with flexible status checks.
 
 ## Installation
 Install from source (recommended):
@@ -16,19 +16,21 @@ On first run, the tool creates a default config file:
 System-wide: `/etc/aiida_mpds_monitor/conf.yaml`
 Fallback (user): `~/.config/aiida_mpds_monitor/conf.yaml` (if no write access to /etc)
 
+### Configuration File Structure
+
 ```yaml
 # Webhook endpoint
 webhook_url: "http://localhost:8080"
 
-# Optional: API key for webhook authentication (Bearer token)
-key: ""
-
 # How often to scan AiiDA database (seconds)
 poll_interval: 60
 
-# WorkChain types to monitor (must match `process_label`)
-workchain_types:
-  - "MPDSStructureWorkChain"
+# Unified workchain hierarchy: parent → child → grandchild
+# Specifies which workchains to monitor and which children/grandchildren to check
+workchain_hierarchy:
+  MPDSStructureWorkChain:
+    BaseCrystalWorkChain:
+      - CrystalParallelCalculation
 
 # Logging
 log_file: "/path/to/logs/aiida_mpds_monitor.log"
@@ -37,46 +39,79 @@ log_max_bytes: 10485760       # 10 MB per log file
 log_backup_count: 5           # Keep 5 rotated logs
 ```
 
-## Usage
-1. Run the background monitor:
+### Authentication
+The API key for webhook authentication is read from the environment variable **`MPDS_MONITOR_KEY`** (Bearer token):
+
 ```bash
+export MPDS_MONITOR_KEY="your-api-key"
+aiida-mpds-monitor
+```
+
+### Detailed Configuration
+For more configuration examples and advanced usage, see [CHILD_WORKCHAIN_CONFIG.md](./CHILD_WORKCHAIN_CONFIG.md).
+
+## Usage
+1. Configure the workchain hierarchy (see [CHILD_WORKCHAIN_CONFIG.md](./CHILD_WORKCHAIN_CONFIG.md) for detailed examples):
+
+```yaml
+# conf.yaml
+webhook_url: "http://example.com/webhook"
+workchain_hierarchy:
+  ParentType:
+    ChildType:
+      - GrandchildType1
+```
+
+2. Set the authentication key and run the daemon:
+```bash
+export MPDS_MONITOR_KEY="your-api-key"
 aiida-mpds-monitor
 ```
 
 The daemon will: 
 
-* Scan for new parent workflows every `poll_interval` seconds.
-* For each BaseCrystalWorkChain with a label:
-    * Send webhook with status when it finishes.
-    * Automatically detect child calculation failures.
-         
-* Mark processed workflows to avoid duplicates.
+* Scan for new parent workflows (matching configured types) every `poll_interval` seconds.
+* For each parent, search for configured child workchains.
+* For each child, check if any configured grandchild calculations failed.
+* Send a webhook with the status when processing is complete.
+* Automatically mark processed workflows to avoid duplicates.
 
 Options: 
 
     `--dry-run`: Dry-run mode — scans nodes and logs actions but does not send webhooks or mark nodes.
-    `--no-marks`: Run and send webhooks on server, but do not mark them as processed. For recovery or one-off runs.
+    `--no-marks`: Run and send webhooks, but do not mark processed workflows. For recovery or one-off runs.
 
 ⚠️ `--dry-run` and `--no-marks` are mutually exclusive - `--dry-run` takes precedence.
 
-
-2. Manually submit results for a parent workflow:
+3. Manually submit results for a parent workflow:
 Useful for backfilling or debugging:
 ```bash
-# Send webhooks for all child calculations of parent PK=12345
-aiida-mpds-submit PARENT_PK
+# Send webhooks for all configured children of parent PK=12345
+export MPDS_MONITOR_KEY="your-api-key"
+aiida-mpds-submit 12345
 
 # Dry-run: see what would be sent (no HTTP request)
-aiida-mpds-submit PARENT_PK --dry-run
+aiida-mpds-submit 12345 --dry-run
 ```
 
 ## Testing with Stub Server
 A built-in stub webhook server is included for local testing:
 
 ```bash
+export MPDS_MONITOR_KEY="test-key"
 aiida-mpds-stub
 ```
 
-This starts a server at http://localhost:8080 that prints all received webhook payloads to the console.
+This starts a server at http://localhost:8080 that accepts webhook payloads and prints them to the console.
+
+## Architecture
+
+The system uses a **hierarchical configuration** approach:
+
+1. **Parent workchains**: Top-level workflows to monitor (configurable)
+2. **Child workchains**: Expected calculations under each parent (configurable)
+3. **Grandchild checks**: Validation of specific child process types (configurable)
+
+This allows monitoring any workflow hierarchy without code changes - simply update the YAML configuration.
 
 Copyright © 2025 Anton Domnin

@@ -5,80 +5,19 @@ import logging
 from aiida import load_profile
 from aiida.orm import load_node, WorkChainNode
 from .config import load_config
-
-BASE_CRYSTAL_TYPE = "BaseCrystalWorkChain"
-STATUS_EXC = "excepted"
-STATUS_DONE = "finished"
-STATUS_WAITING = "waiting"
-
-def send_webhook(webhook_url, payload, status, key=None):
-    import requests
-    data = {"payload": payload, "status": status}
-    headers = {}
-    if key:
-        headers["Authorization"] = f"Bearer {key}"
-    try:
-        response = requests.post(webhook_url, data=data, headers=headers, timeout=10)
-        return response.status_code == 200
-    except Exception as e:
-        print(f"Webhook error: {e}")
-        return False
+from .webhook import send_webhook
+from .status import (
+    BASE_CRYSTAL_TYPE,
+    get_node_status,
+)
 
 
-def check_child_calculation(base_node):
-    """Check if the last CrystalParallelCalculation child failed.
-    Returns True if the child is broken, False otherwise.
-    
-    Note: If CrystalParallelCalculation was retried, we check only the LAST attempt.
-    If the last attempt succeeded, we return False even if earlier attempts failed.
-    """
-    try:
-        called_nodes = base_node.called
-        crystal_calcs = [
-            n for n in called_nodes
-            if hasattr(n, 'process_label') and n.process_label == "CrystalParallelCalculation"
-        ]
-        if not crystal_calcs:
-            return False
-        
-        # Check the last (most recent) CrystalParallelCalculation by PK
-        # If the calculation was retried, we only care about the final attempt
-        last_calc = max(crystal_calcs, key=lambda n: n.pk)
-        is_broken = last_calc.is_failed or last_calc.is_excepted or last_calc.is_killed
-        if is_broken:
-            logging.warning(f"BaseCrystalWorkChain {base_node.pk} finished but child CrystalParallelCalculation {last_calc.pk} failed")
-        return is_broken
-    except Exception:
-        return False
-
-
-def get_node_status(node):
-    state = node.process_state.value
-    if state.lower() == "finished":
-        # Check if any child CrystalParallelCalculation failed
-        if check_child_calculation(node):
-            return STATUS_EXC
-        
-        excepted = node.is_excepted
-        exit_code = node.exit_code.status if node.exit_code else 0
-        if not excepted and exit_code == 0:
-            return STATUS_DONE
-        # if node broke due to unexpected error (in code, for example)
-        if excepted and not node.is_failed:
-            return STATUS_EXC
-        else:
-            return f"{STATUS_EXC}-{exit_code}"
-    elif state.lower() in ["running", "submitting", "created"]:
-        return STATUS_WAITING
-    elif state.lower() in ["excepted"]:
-        exit_code = node.exit_code.status if node.exit_code else 1
-        return f"{STATUS_EXC}-{exit_code}"
-    else:
-        # For any other error states
-        return STATUS_EXC
-
-
-def submit_parent(parent_pk: int, webhook_url: str, webhook_key: str = "", dry_run: bool = False):
+def submit_parent(
+    parent_pk: int,
+    webhook_url: str,
+    webhook_key: str = "",
+    dry_run: bool = False,
+):
     parent_node = load_node(parent_pk)
 
     if not isinstance(parent_node, WorkChainNode):
@@ -86,15 +25,17 @@ def submit_parent(parent_pk: int, webhook_url: str, webhook_key: str = "", dry_r
 
     called_nodes = parent_node.called
     base_nodes = [
-        n for n in called_nodes
-        if isinstance(n, WorkChainNode) and n.process_label == BASE_CRYSTAL_TYPE
+        n
+        for n in called_nodes
+        if isinstance(n, WorkChainNode)
+        and n.process_label == BASE_CRYSTAL_TYPE
     ]
 
     # Check if parent is in a failed state
     parent_is_broken = (
-        parent_node.is_failed or
-        parent_node.is_excepted or
-        parent_node.is_killed
+        parent_node.is_failed
+        or parent_node.is_excepted
+        or parent_node.is_killed
     )
 
     if parent_is_broken:
@@ -105,16 +46,29 @@ def submit_parent(parent_pk: int, webhook_url: str, webhook_key: str = "", dry_r
                     status = get_node_status(base)
                     payload = label.strip()
                     if dry_run:
-                        print(f"[DRY-RUN] Parent {parent_pk} failed — would send: payload='{payload}', status='{status}'")
+                        print(
+                            f"[DRY-RUN] Parent {parent_pk} failed — would send: payload='{payload}', status='{status}'"
+                        )
                     else:
-                        if send_webhook(webhook_url, payload, status, key=webhook_key):
-                            print(f"Sent ERROR webhook for last subtask '{payload}' ({status})")
+                        if send_webhook(
+                            webhook_url, payload, status, key=webhook_key
+                        ):
+                            print(
+                                f"Sent ERROR webhook for last subtask '{payload}' ({status})"
+                            )
                         else:
-                            print(f"Failed to send webhook for '{payload}'", file=sys.stderr)
+                            print(
+                                f"Failed to send webhook for '{payload}'",
+                                file=sys.stderr,
+                            )
                 else:
-                    print(f"Parent {parent_pk} failed, but last BaseCrystalWorkChain has no label — skipping")
+                    print(
+                        f"Parent {parent_pk} failed, but last BaseCrystalWorkChain has no label — skipping"
+                    )
         else:
-            print(f"Parent {parent_pk} failed but launched no BaseCrystalWorkChain — nothing to report")
+            print(
+                f"Parent {parent_pk} failed but launched no BaseCrystalWorkChain — nothing to report"
+            )
         return
 
     # Normal case: parent is OK — process all subnodes
@@ -132,7 +86,9 @@ def submit_parent(parent_pk: int, webhook_url: str, webhook_key: str = "", dry_r
         status = get_node_status(base_node)
 
         if dry_run:
-            print(f"[DRY-RUN] Would send: payload='{label}', status='{status}'")
+            print(
+                f"[DRY-RUN] Would send: payload='{label}', status='{status}'"
+            )
         else:
             if send_webhook(webhook_url, label, status, key=webhook_key):
                 print(f"Sent webhook for '{label}' ({status})")
@@ -143,17 +99,13 @@ def submit_parent(parent_pk: int, webhook_url: str, webhook_key: str = "", dry_r
 def main():
     parser = argparse.ArgumentParser(
         description="Submit results of a parent workchain to webhook",
-        usage="aiida-mpds-submit PARENT_PK [--dry-run]"
+        usage="aiida-mpds-submit PARENT_PK [--dry-run]",
     )
     parser.add_argument(
-        "parent_pk",
-        type=int,
-        help="PK of the parent WorkChain"
+        "parent_pk", type=int, help="PK of the parent WorkChain"
     )
     parser.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="Only show what would be sent"
+        "--dry-run", action="store_true", help="Only show what would be sent"
     )
     args = parser.parse_args()
 
@@ -162,7 +114,12 @@ def main():
 
     logging.basicConfig(level=logging.INFO)
     try:
-        submit_parent(args.parent_pk, config.webhook_url, webhook_key=config.get('key', ''), dry_run=args.dry_run)
+        submit_parent(
+            args.parent_pk,
+            config.webhook_url,
+            webhook_key=config.get("key", ""),
+            dry_run=args.dry_run,
+        )
     except Exception as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)

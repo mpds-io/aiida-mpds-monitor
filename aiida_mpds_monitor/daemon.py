@@ -1,4 +1,3 @@
-# aiida_mpds_monitor/daemon.py
 import os
 import sys
 import logging
@@ -7,15 +6,15 @@ import time
 from aiida import load_profile
 from aiida.orm import QueryBuilder, WorkChainNode
 from .config import load_config
+from .webhook import send_webhook
+from .status import (
+    BASE_CRYSTAL_TYPE,
+    EXTRA_FINISHED,
+    EXTRA_PARENT_PROCESSED,
+    EXTRA_PARENT_ERROR_SENT,
+    get_node_status,
+)
 
-BASE_CRYSTAL_TYPE = "BaseCrystalWorkChain"
-EXTRA_STARTED = "webhook_started"
-EXTRA_FINISHED = "webhook_finished"
-EXTRA_PARENT_PROCESSED = "webhook_parent_processed"
-EXTRA_PARENT_ERROR_SENT = "webhook_parent_error_sent"
-STATUS_EXC = "excepted"
-STATUS_DONE = "finished"
-STATUS_WAITING = "waiting"
 
 def setup_logger(config):
     logger = logging.getLogger("aiida_mpds_monitor")
@@ -31,11 +30,11 @@ def setup_logger(config):
     file_handler = logging.handlers.RotatingFileHandler(
         config.log_file,
         maxBytes=config.get("log_max_bytes", 10 * 1024 * 1024),
-        backupCount=config.get("log_backup_count", 3)
+        backupCount=config.get("log_backup_count", 3),
     )
     file_formatter = logging.Formatter(
         "%(asctime)s - %(levelname)s - %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S"
+        datefmt="%Y-%m-%d %H:%M:%S",
     )
     file_handler.setFormatter(file_formatter)
     logger.addHandler(file_handler)
@@ -48,76 +47,14 @@ def setup_logger(config):
     return logger
 
 
-def send_webhook(webhook_url, payload, status, key=None):
-    import requests
-    data = {"payload": payload, "status": status}
-    headers = {}
-    if key:
-        headers["Authorization"] = f"Bearer {key}"
-    try:
-        response = requests.post(webhook_url, data=data, headers=headers, timeout=10)
-        return response.status_code == 200
-    except Exception:
-        return False
-
-
-def check_child_calculation(base_node, logger=None):
-    """Check if the last CrystalParallelCalculation child failed.
-    Returns True if the child is broken, False otherwise.
-    
-    Note: If CrystalParallelCalculation was retried, we check only the LAST attempt.
-    If the last attempt succeeded, we return False even if earlier attempts failed.
-    """
-    try:
-        called_nodes = base_node.called
-        crystal_calcs = [
-            n for n in called_nodes
-            if hasattr(n, 'process_label') and n.process_label == "CrystalParallelCalculation"
-        ]
-        if not crystal_calcs:
-            return False
-        
-        # Check the last (most recent) CrystalParallelCalculation by PK
-        # If the calculation was retried, we only care about the final attempt
-        last_calc = max(crystal_calcs, key=lambda n: n.pk)
-        is_broken = last_calc.is_failed or last_calc.is_excepted or last_calc.is_killed
-        if is_broken and logger:
-            logger.warning(f"BaseCrystalWorkChain {base_node.pk} finished but child CrystalParallelCalculation {last_calc.pk} failed")
-        return is_broken
-    except Exception:
-        return False
-
-
-def get_node_status(node, logger=None):
-    state = node.process_state.value
-    if state.lower() == "finished":
-        # Check if any child CrystalParallelCalculation failed
-        if check_child_calculation(node, logger=logger):
-            return STATUS_EXC 
-        
-        excepted = node.is_excepted
-        exit_code = node.exit_code.status if node.exit_code else 0
-        if exit_code == 0 and not excepted:
-            return STATUS_DONE
-        # if node broke due to unexpected error (in code, for example)
-        if excepted and not node.is_failed:
-            return STATUS_EXC 
-        else:
-            return f"excepted-{exit_code}"
-    elif state.lower() in ["running", "submitting", "created"]:
-        return STATUS_WAITING
-    elif state.lower() in ["excepted"]:
-        exit_code = node.exit_code.status if node.exit_code else 1
-        return f"{STATUS_EXC}-{exit_code}"
-    else:
-        # For any other error states
-        return STATUS_EXC
-
-
-def process_base_workchain(base_node, webhook_url, webhook_key, logger, no_marks=False):
+def process_base_workchain(
+    base_node, webhook_url, webhook_key, logger, no_marks=False
+):
     label = base_node.label
     if not label or not label.strip():
-        logger.debug(f"Skipping BaseCrystalWorkChain {base_node.pk} — empty label")
+        logger.debug(
+            f"Skipping BaseCrystalWorkChain {base_node.pk} — empty label"
+        )
         return
 
     label = label.strip()
@@ -143,7 +80,7 @@ def scan_and_process(config, logger, no_marks=False):
     qb.append(
         WorkChainNode,
         filters={"attributes.process_label": {"in": config.workchain_types}},
-        tag="parent"
+        tag="parent",
     )
     # We process only those that are not yet marked as processed
     qb.add_filter("parent", {"extras": {"!has_key": EXTRA_PARENT_PROCESSED}})
@@ -153,15 +90,17 @@ def scan_and_process(config, logger, no_marks=False):
         logger.debug(f"Processing parent workchain {parent_node.pk}")
 
         parent_is_broken = (
-            parent_node.is_failed or
-            parent_node.is_excepted or
-            parent_node.is_killed
+            parent_node.is_failed
+            or parent_node.is_excepted
+            or parent_node.is_killed
         )
 
         called_nodes = parent_node.called
         base_nodes = [
-            n for n in called_nodes
-            if isinstance(n, WorkChainNode) and n.process_label == BASE_CRYSTAL_TYPE
+            n
+            for n in called_nodes
+            if isinstance(n, WorkChainNode)
+            and n.process_label == BASE_CRYSTAL_TYPE
         ]
 
         if parent_is_broken:
@@ -172,16 +111,27 @@ def scan_and_process(config, logger, no_marks=False):
                         label = base.label
                         if label and label.strip():
                             status = get_node_status(base, logger=logger)
-                            if send_webhook(webhook_url, label.strip(), status, key=config.get("key", "")):
-                                logger.warning(f"ERROR webhook sent for subtask '{label}' (status: {status}, parent {parent_node.pk} failed)")
+                            if send_webhook(
+                                webhook_url,
+                                label.strip(),
+                                status,
+                                key=config.get("key", ""),
+                            ):
+                                logger.warning(
+                                    f"ERROR webhook sent for subtask '{label}' (status: {status}, parent {parent_node.pk} failed)"
+                                )
                             else:
-                                logger.error(f"Failed to send ERROR webhook for '{label}'")
+                                logger.error(
+                                    f"Failed to send ERROR webhook for '{label}'"
+                                )
                         # else: skip empty label
                     # Mark that the error has been handled (if allowed)
                     if not no_marks:
                         parent_node.set_extra(EXTRA_PARENT_ERROR_SENT, True)
                 else:
-                    logger.debug(f"Parent {parent_node.pk} failed but has no BaseCrystalWorkChain — nothing to report")
+                    logger.debug(
+                        f"Parent {parent_node.pk} failed but has no BaseCrystalWorkChain — nothing to report"
+                    )
 
             # Mark the parent as processed (if allowed)
             if not no_marks:
@@ -190,7 +140,13 @@ def scan_and_process(config, logger, no_marks=False):
 
         # Normal processing
         for base_node in base_nodes:
-            process_base_workchain(base_node, webhook_url, config.get("key", ""), logger, no_marks=no_marks)
+            process_base_workchain(
+                base_node,
+                webhook_url,
+                config.get("key", ""),
+                logger,
+                no_marks=no_marks,
+            )
 
         if not no_marks:
             parent_node.set_extra(EXTRA_PARENT_PROCESSED, True)
@@ -201,12 +157,11 @@ def scan_and_process(config, logger, no_marks=False):
 
 # For dry-run testing
 def scan_and_process_dry_run(config, logger):
-
     qb = QueryBuilder()
     qb.append(
         WorkChainNode,
         filters={"attributes.process_label": {"in": config.workchain_types}},
-        tag="parent"
+        tag="parent",
     )
     qb.add_filter("parent", {"extras": {"!has_key": EXTRA_PARENT_PROCESSED}})
 
@@ -215,15 +170,17 @@ def scan_and_process_dry_run(config, logger):
         logger.debug(f"[TEST] Would process parent {parent_node.pk}")
 
         parent_is_broken = (
-            parent_node.is_failed or
-            parent_node.is_excepted or
-            parent_node.is_killed
+            parent_node.is_failed
+            or parent_node.is_excepted
+            or parent_node.is_killed
         )
 
         called_nodes = parent_node.called
         base_nodes = [
-            n for n in called_nodes
-            if isinstance(n, WorkChainNode) and n.process_label == BASE_CRYSTAL_TYPE
+            n
+            for n in called_nodes
+            if isinstance(n, WorkChainNode)
+            and n.process_label == BASE_CRYSTAL_TYPE
         ]
 
         if parent_is_broken:
@@ -232,8 +189,12 @@ def scan_and_process_dry_run(config, logger):
                     label = base.label
                     if label and label.strip():
                         status = get_node_status(base, logger=logger)
-                        logger.info(f"[TEST] Would send webhook for '{label}' (status: {status}, parent failed)")
-            logger.info(f"[TEST] Would mark parent {parent_node.pk} as processed")
+                        logger.info(
+                            f"[TEST] Would send webhook for '{label}' (status: {status}, parent failed)"
+                        )
+            logger.info(
+                f"[TEST] Would mark parent {parent_node.pk} as processed"
+            )
             continue
 
         for base_node in base_nodes:
@@ -242,23 +203,26 @@ def scan_and_process_dry_run(config, logger):
                 continue
             label = label.strip()
             status = get_node_status(base_node, logger=logger)
-            logger.info(f"[TEST] Would send webhook for '{label}' (status: {status})")
+            logger.info(
+                f"[TEST] Would send webhook for '{label}' (status: {status})"
+            )
 
         logger.info(f"[TEST] Would mark parent {parent_node.pk} as processed")
 
 
 def main():
     import argparse
+
     parser = argparse.ArgumentParser(description="AiiDA MPDS Monitor Daemon")
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Dry-run: show what would be done, but DO NOT send webhooks or set marks."
+        help="Dry-run: show what would be done, but DO NOT send webhooks or set marks.",
     )
     parser.add_argument(
         "--no-marks",
         action="store_true",
-        help="Send webhooks, but DO NOT set any extras on nodes (useful for recovery or one-off runs)."
+        help="Send webhooks, but DO NOT set any extras on nodes (useful for recovery or one-off runs).",
     )
     args = parser.parse_args()
 

@@ -13,7 +13,8 @@ pip install .
 ## Workflow Label Requirement
 
 > [!IMPORTANT]
-> The **label** field of your AiiDA workflow is critically important for webhook delivery and server-side processing. The label serves as a unique identifier that allows the MPDS server to understand which system this workflow belongs to and what specific task was being solved. Without a properly set label, the server will be unable to route the webhook correctly and process the results. Ensure that every workflow you submit has a meaningful and descriptive label that clearly identifies both the computational system and the nature of the work performed.
+> The **label** field of your AiiDA workflow is critical for webhook delivery and server-side processing. aiida-mpds-monitor expects that the tag is an identifier that allows the server to understand which object this workflow belongs to and which specific task was solved. Therefore, if the workflow does not have a tag, the monitor simply will not send a request to the server.
+> Мake sure that each workflow you send has a label, for example: 'HgI2/137: Geometry optimization'
 
 ## Configuration
 On first run, the tool creates a default config file: 

@@ -16,12 +16,11 @@ def send_webhook(webhook_url, payload, status, key=None):
         bool: True if webhook was sent successfully (status code 200), False otherwise
     """
     data = {"payload": payload, "status": status}
-    headers = {}
     if key:
-        headers["Authorization"] = f"Bearer {key}"
+        data["key"] = key
     try:
         response = requests.post(
-            webhook_url, data=data, headers=headers, timeout=10
+            webhook_url, data=data, timeout=10
         )
         return response.status_code == 200
     except Exception as e:

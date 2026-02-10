@@ -1,9 +1,10 @@
-# aiida_mpds_monitor/config.py
+
 import os
 from pathlib import Path
 
 import yaml
 from aiida.common.extendeddicts import AttributeDict
+
 
 DEFAULT_CONFIG_PATH = Path("/etc/aiida_mpds_monitor/conf.yaml")
 

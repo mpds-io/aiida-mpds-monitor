@@ -4,6 +4,7 @@ A lightweight daemon and CLI tool to monitor AiiDA workflows and automatically s
 
 ## Installation
 Install from source (recommended):
+
 ```bash
 git clone https://github.com/mpds-io/aiida-mpds-monitor.git
 cd aiida-mpds-monitor
@@ -17,12 +18,10 @@ pip install .
 > Мake sure that each workflow you send has a label, for example: 'HgI2/137: Geometry optimization'
 
 ## Configuration
-On first run, the tool creates a default config file: 
+On first run, the tool creates a default config file:
 
 System-wide: `/etc/aiida_mpds_monitor/conf.yaml`
 Fallback (user): `~/.config/aiida_mpds_monitor/conf.yaml` (if no write access to /etc)
-
-### Configuration File Structure
 
 ```yaml
 # Webhook endpoint
@@ -63,7 +62,7 @@ export MPDS_MONITOR_KEY="your-api-key"
 aiida-mpds-monitor
 ```
 
-The daemon will: 
+The daemon will:
 
 * Scan for new parent workflows (matching configured types) every `poll_interval` seconds.
 * For each parent, search for configured child workchains.
@@ -71,7 +70,7 @@ The daemon will:
 * Send a webhook with the status when processing is complete.
 * Automatically mark processed workflows to avoid duplicates.
 
-Options: 
+Options:
 
     `--dry-run`: Dry-run mode — scans nodes and logs actions but does not send webhooks or mark nodes.
     `--no-commit`: Run and send webhooks, but do not mark processed workflows. For recovery or one-off runs.
@@ -80,6 +79,7 @@ Options:
 
 3. Manually submit results for a parent workflow:
 Useful for backfilling or debugging:
+
 ```bash
 # Send webhooks for all configured children of parent PK=12345
 export MPDS_MONITOR_KEY="your-api-key"
@@ -108,4 +108,4 @@ The system uses a **hierarchical configuration** approach:
 
 This allows monitoring any workflow hierarchy without code changes - simply update the YAML configuration.
 
-Copyright © 2025 Anton Domnin
+Copyright © 2025 Anton Domnin, Materials Platform for Data Science OÜ

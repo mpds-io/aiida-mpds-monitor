@@ -3,6 +3,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import parse_qs
 
 
+
 class WebhookHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         # Parse request body

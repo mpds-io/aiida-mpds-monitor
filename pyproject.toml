@@ -36,8 +36,8 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/akvatol/aiida_mpds_monitor"
-Repository = "https://github.com/akvatol/aiida_mpds_monitor"
+Homepage = "https://github.com/mpds-io/aiida_mpds_monitor"
+Repository = "https://github.com/mpds-io/aiida_mpds_monitor"
 
 [project.scripts]
 aiida-mpds-monitor = "aiida_mpds_monitor.daemon:main"

@@ -79,9 +79,9 @@ The daemon will:
 Options: 
 
     `--dry-run`: Dry-run mode — scans nodes and logs actions but does not send webhooks or mark nodes.
-    `--no-marks`: Run and send webhooks, but do not mark processed workflows. For recovery or one-off runs.
+    `--no-commit`: Run and send webhooks, but do not mark processed workflows. For recovery or one-off runs.
 
-⚠️ `--dry-run` and `--no-marks` are mutually exclusive - `--dry-run` takes precedence.
+⚠️ `--dry-run` and `--no-commit` are mutually exclusive - `--dry-run` takes precedence.
 
 3. Manually submit results for a parent workflow:
 Useful for backfilling or debugging:

@@ -10,6 +10,11 @@ cd aiida-mpds-monitor
 pip install .
 ```
 
+## Workflow Label Requirement
+
+> [!IMPORTANT]
+> The **label** field of your AiiDA workflow is critically important for webhook delivery and server-side processing. The label serves as a unique identifier that allows the MPDS server to understand which system this workflow belongs to and what specific task was being solved. Without a properly set label, the server will be unable to route the webhook correctly and process the results. Ensure that every workflow you submit has a meaningful and descriptive label that clearly identifies both the computational system and the nature of the work performed.
+
 ## Configuration
 On first run, the tool creates a default config file: 
 
@@ -47,11 +52,8 @@ export MPDS_MONITOR_KEY="your-api-key"
 aiida-mpds-monitor
 ```
 
-### Detailed Configuration
-For more configuration examples and advanced usage, see [CHILD_WORKCHAIN_CONFIG.md](./CHILD_WORKCHAIN_CONFIG.md).
-
 ## Usage
-1. Configure the workchain hierarchy (see [CHILD_WORKCHAIN_CONFIG.md](./CHILD_WORKCHAIN_CONFIG.md) for detailed examples):
+1. Configure the workchain hierarchy:
 
 ```yaml
 # conf.yaml

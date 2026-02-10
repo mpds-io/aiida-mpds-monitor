@@ -45,14 +45,6 @@ log_max_bytes: 10485760       # 10 MB per log file
 log_backup_count: 5           # Keep 5 rotated logs
 ```
 
-### Authentication
-The API key for webhook authentication is read from the environment variable **`MPDS_MONITOR_KEY`** (Bearer token):
-
-```bash
-export MPDS_MONITOR_KEY="your-api-key"
-aiida-mpds-monitor
-```
-
 ## Usage
 1. Configure the workchain hierarchy:
 
@@ -101,7 +93,6 @@ aiida-mpds-submit 12345 --dry-run
 A built-in stub webhook server is included for local testing:
 
 ```bash
-export MPDS_MONITOR_KEY="test-key"
 aiida-mpds-stub
 ```
 

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "aiida-mpds-monitor"
-version = "0.1.0"
+version = "0.7.2"
 description = "AiiDA webhook monitor for MPDS workflows"
 readme = "README.md"
 license = { text = "MIT" }
@@ -27,6 +27,12 @@ dependencies = [
     "aiida-core>=2.0",
     "PyYAML",
     "requests"
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=6.0",
+    "pytest-cov>=2.12",
 ]
 
 [project.urls]

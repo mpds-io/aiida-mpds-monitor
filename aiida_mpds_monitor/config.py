@@ -1,8 +1,8 @@
 
 import os
-import yaml
 from pathlib import Path
 
+import yaml
 from aiida.common.extendeddicts import AttributeDict
 
 
@@ -11,11 +11,13 @@ DEFAULT_CONFIG_PATH = Path("/etc/aiida_mpds_monitor/conf.yaml")
 DEFAULT_CONFIG = {
     "webhook_url": "http://localhost:8080",
     "poll_interval": 30,
-    "workchain_types": [
-        "MPDSStructureWorkChain"
-    ],
+    "workchain_hierarchy": {
+        "MPDSStructureWorkChain": {
+            "BaseCrystalWorkChain": ["CrystalParallelCalculation"]
+        }
+    },
     "log_file": "/data/aiida_mpds_monitor.log",
-    "log_level": "WARNING", # INFO, DEBUG, INFO, WARNING, ERROR
+    "log_level": "WARNING",  # INFO, DEBUG, WARNING, ERROR
     "log_max_bytes": 10 * 1024 * 1024,  # 10 MB
     "log_backup_count": 3,
 }
@@ -57,3 +59,12 @@ def load_config():
     # Merging user config with defaults
     final_config = {**DEFAULT_CONFIG, **user_config}
     return AttributeDict(final_config)
+
+
+def get_auth_key():
+    """Get authentication key from MPDS_MONITOR_KEY environment variable.
+
+    Returns:
+        str: The authentication key, or empty string if not set
+    """
+    return os.environ.get("MPDS_MONITOR_KEY", "")

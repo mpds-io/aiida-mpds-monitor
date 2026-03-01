@@ -276,6 +276,13 @@ def main():
         action="store_true",
         help="Send webhooks, but DO NOT set any extras on nodes (useful for recovery or one-off runs).",
     )
+    parser.add_argument(
+        "--logging-level",
+        "-l",
+        dest="logging_level",
+        help="Logging level (DEBUG, INFO, WARNING, ERROR). Defaults to ERROR if not provided.",
+        default="ERROR",
+    )
     args = parser.parse_args()
 
     # In --test mode, no marks are set and webhooks are not sent.
@@ -291,6 +298,16 @@ def main():
 
     load_profile()
     config = load_config()
+    # Use CLI logging level explicitly, default to ERROR if omitted
+    level_map = {
+        "DEBUG": "DEBUG",
+        "INFO": "INFO",
+        "WARNING": "WARNING",
+        "ERROR": "ERROR",
+        "CRITICAL": "CRITICAL",
+    }
+    level_name = (args.logging_level or "ERROR").upper()
+    config.log_level = level_map.get(level_name, "ERROR")
     logger = setup_logger(config)
 
     if dry_run:

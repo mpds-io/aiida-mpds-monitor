@@ -122,6 +122,13 @@ def main():
         "parent_pk", type=int, help="PK of the parent WorkChain"
     )
     parser.add_argument(
+        "--logging-level",
+        "-l",
+        dest="logging_level",
+        help="Logging level (DEBUG, INFO, WARNING, ERROR). Defaults to ERROR if not provided.",
+        default="ERROR",
+    )
+    parser.add_argument(
         "--dry-run", action="store_true", help="Only show what would be sent"
     )
     args = parser.parse_args()
@@ -129,12 +136,26 @@ def main():
     load_profile()
     config = load_config()
 
-    logging.basicConfig(level=logging.INFO)
+    # Determine logging level from CLI only; default to ERROR
+    level_map = {
+        "DEBUG": logging.DEBUG,
+        "INFO": logging.INFO,
+        "WARNING": logging.WARNING,
+        "ERROR": logging.ERROR,
+        "CRITICAL": logging.CRITICAL,
+    }
+    level = level_map.get(args.logging_level.upper(), logging.ERROR)
+
+    logging.basicConfig(level=level)
+    webhook_key = get_auth_key()
+    if not webhook_key:
+        logging.warning("Caanot find 'MPDS_MONITOR_KEY' varibale in the enviroment.")
+
     try:
         submit_parent(
             args.parent_pk,
             config.webhook_url,
-            webhook_key=get_auth_key(),
+            webhook_key=webhook_key,
             dry_run=args.dry_run,
             config=config,
         )

@@ -71,11 +71,26 @@ The daemon will:
 * Automatically mark processed workflows to avoid duplicates.
 
 Options:
+Options:
 
-    `--dry-run`: Dry-run mode — scans nodes and logs actions but does not send webhooks or mark nodes.
-    `--no-commit`: Run and send webhooks, but do not mark processed workflows. For recovery or one-off runs.
+  `--dry-run`: Dry-run mode — scans nodes and logs actions but does not send webhooks or mark nodes.
+  `--no-commit`: Run and send webhooks, but do not mark processed workflows. For recovery or one-off runs.
+  `--logging-level` / `-l`: Set the runtime logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL). If omitted, the tools default to `ERROR`.
 
 ⚠️ `--dry-run` and `--no-commit` are mutually exclusive - `--dry-run` takes precedence.
+
+Examples:
+
+```bash
+# Default logging level (ERROR)
+aiida-mpds-submit 12345
+
+# Explicit logging level for more verbosity
+aiida-mpds-submit 12345 --logging-level INFO
+
+# Run daemon with debug logging
+aiida-mpds-monitor --logging-level DEBUG
+```
 
 3. Manually submit results for a parent workflow:
 Useful for backfilling or debugging:

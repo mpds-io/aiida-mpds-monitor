@@ -43,17 +43,7 @@ def check_child_calculation(base_node, child_types=None, logger=None):
 
 
 def get_node_status(node, child_types=None, logger=None):
-    """Determine the status of an AiiDA node.
-
-    Args:
-        node: The AiiDA node to check
-        child_types (list, optional): List of child process labels to check for failures.
-            Defaults to ["CrystalParallelCalculation"]
-        logger (logging.Logger, optional): Logger for warning messages
-
-    Returns:
-        str: One of STATUS_DONE, STATUS_EXC, STATUS_WAITING, or "excepted-{exit_code}"
-    """
+    """Determine the status of an AiiDA node."""
     if child_types is None:
         child_types = ["CrystalParallelCalculation"]
 
@@ -61,32 +51,54 @@ def get_node_status(node, child_types=None, logger=None):
 
     if state.lower() == "finished":
         if check_child_calculation(node, child_types=child_types, logger=logger):
+            # Child failed — get its exit code if available
+            child_exit_code = _get_child_exit_code(node, child_types)
+            if child_exit_code and child_exit_code != 0:
+                return f"{STATUS_EXC}-{child_exit_code}"
             return STATUS_EXC
 
         excepted = node.is_excepted
         exit_code = node.exit_code.status if node.exit_code is not None else 0
-
         if exit_code == 0 and not excepted:
             return STATUS_DONE
-
         if excepted:
             if exit_code != 0:
                 return f"{STATUS_EXC}-{exit_code}"
             else:
                 return STATUS_EXC
-
         if exit_code != 0:
             return f"{STATUS_EXC}-{exit_code}"
-
         return STATUS_EXC
 
     elif state.lower() in ["running", "submitting", "created"]:
         return STATUS_WAITING
 
     elif state.lower() == "excepted":
-        exit_code = node.exit_code.status if node.exit_code is not None else 500
-        return f"{STATUS_EXC}-{exit_code}"
+        # Checking child exit codes
+        child_exit_code = _get_child_exit_code(node, child_types)
+        if child_exit_code and child_exit_code != 0:
+            # Exit code of child process
+            return f"{STATUS_EXC}-{child_exit_code}"
+
+        return STATUS_EXC
 
     else:
-        # (failed, killed, etc.)
+        # failed, killed, etc.
         return STATUS_EXC
+
+
+def _get_child_exit_code(node, child_types):
+    """Get exit_code of last gradnchild process."""
+    try:
+        called_nodes = node.called
+        child_calcs = [n for n in called_nodes if hasattr(n, "process_label") and n.process_label in child_types]
+        if not child_calcs:
+            return None
+
+        last_calc = max(child_calcs, key=lambda n: n.pk)
+
+        if last_calc.exit_code is not None:
+            return last_calc.exit_code.status
+        return None
+    except Exception:
+        return None

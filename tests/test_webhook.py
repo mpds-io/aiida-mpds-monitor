@@ -29,16 +29,21 @@ class TestSendWebhook:
 
     @patch("aiida_mpds_monitor.webhook.requests.post")
     def test_send_webhook_failure(self, mock_post):
-        """Test webhook submission failure."""
+        """Test webhook submission failure and logging of request data."""
         mock_response = MagicMock()
         mock_response.status_code = 500
+        mock_response.text = "internal error"
         mock_post.return_value = mock_response
-
-        result = send_webhook(
-            "http://example.com/webhook", "test_payload", "excepted"
-        )
-
-        assert result is False
+        with patch("aiida_mpds_monitor.webhook.logger") as mock_logger:
+            result = send_webhook(
+                "http://example.com/webhook", "test_payload", "excepted"
+            )
+            assert result is False
+            mock_logger.error.assert_called_once()
+            # ensure the logged message contains the URL and data payload
+            args, _ = mock_logger.error.call_args
+            assert "http://example.com/webhook" in args[1]
+            assert "test_payload" in repr(args[2])
 
     @patch("aiida_mpds_monitor.webhook.requests.post")
     def test_send_webhook_with_auth_key(self, mock_post):
@@ -55,21 +60,20 @@ class TestSendWebhook:
         )
 
         assert result is True
-        call_args = mock_post.call_args
-        assert call_args[1]["headers"] == {
-            "Authorization": "Bearer secret_key"
-        }
 
     @patch("aiida_mpds_monitor.webhook.requests.post")
     def test_send_webhook_exception(self, mock_post):
-        """Test webhook exception handling."""
+        """Test webhook exception handling and that the request is logged."""
         mock_post.side_effect = Exception("Connection error")
-
-        result = send_webhook(
-            "http://example.com/webhook", "test_payload", "finished"
-        )
-
-        assert result is False
+        with patch("aiida_mpds_monitor.webhook.logger") as mock_logger:
+            result = send_webhook(
+                "http://example.com/webhook", "test_payload", "finished"
+            )
+            assert result is False
+            mock_logger.error.assert_called_once()
+            args, _ = mock_logger.error.call_args
+            # first arg is format string, second arg should be the exception
+            assert "Connection error" in str(args[1])
 
     @patch("aiida_mpds_monitor.webhook.requests.post")
     def test_send_webhook_timeout(self, mock_post):

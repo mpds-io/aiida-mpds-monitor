@@ -106,7 +106,7 @@ wheels = [
 
 [[package]]
 name = "aiida-mpds-monitor"
-version = "0.7.3"
+version = "0.8.2"
 source = { editable = "." }
 dependencies = [
     { name = "aiida-core", version = "2.3.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.9'" },

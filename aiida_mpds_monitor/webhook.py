@@ -2,6 +2,8 @@ import logging
 
 import requests
 
+logger = logging.getLogger(__name__)
+
 
 def send_webhook(webhook_url, payload, status, key=None):
     """Send a webhook notification with the given payload and status.
@@ -22,7 +24,24 @@ def send_webhook(webhook_url, payload, status, key=None):
         response = requests.post(
             webhook_url, data=data, timeout=10
         )
-        return response.status_code == 200
+        if response.status_code == 200:
+            return True
+
+        # non-200 response
+        logger.error(
+            "Webhook returned non-200 status %s for %s; data=%r; response=%r",
+            response.status_code,
+            webhook_url,
+            data,
+            # include response text if available
+            getattr(response, "text", None),
+        )
+        return False
     except Exception as e:
-        logging.debug(f"Webhook error: {e}")
+        logger.error(
+            "Webhook error: %s (url=%s, data=%r)",
+            e,
+            webhook_url,
+            data,
+        )
         return False

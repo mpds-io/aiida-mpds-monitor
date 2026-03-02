@@ -56,7 +56,15 @@ def process_base_workchain(
     hierarchy,
     parent_label,
     no_commit=False,
+    force=False,
 ):
+    """Handle one base workchain node.
+
+    When ``force`` is True we ignore any ``EXTRA_FINISHED`` flag and always
+    attempt to send a webhook.  This is used by the ``--resend-all`` CLI
+    option to re‑deliver hooks regardless of previous marks.
+    """
+
     label = base_node.label
     if not label or not label.strip():
         logger.debug(
@@ -72,6 +80,9 @@ def process_base_workchain(
 
     # Send webhook when state changes or when terminal state is reached
     already_finished = base_node.base.extras.get(EXTRA_FINISHED, False)
+    if force:
+        already_finished = False
+
     if not already_finished:
         status = get_node_status(
             base_node, child_types=grandchild_types, logger=logger
@@ -84,23 +95,24 @@ def process_base_workchain(
             logger.warning(f"Failed to send webhook for '{label}'")
 
 
-def scan_and_process(config, logger, no_commit=False):
+def scan_and_process(config, logger, no_commit=False, force=False):
     webhook_url = config.webhook_url
 
     # Get parent workchain types from hierarchy keys
     hierarchy = config.get("workchain_hierarchy", {})
     workchain_types = list(hierarchy.keys())
 
-    # Request ALL parent nodes of the specified type that have not yet been processed.
-    # Including those that failed!
+    # Request ALL parent nodes of the specified type that have not yet been processed,
+    # unless the user explicitly forces a resend. Including those that failed!
     qb = QueryBuilder()
     qb.append(
         WorkChainNode,
         filters={"attributes.process_label": {"in": workchain_types}},
         tag="parent",
     )
-    # We process only those that are not yet marked as processed
-    qb.add_filter("parent", {"extras": {"!has_key": EXTRA_PARENT_PROCESSED}})
+    if not force:
+        # We process only those that are not yet marked as processed
+        qb.add_filter("parent", {"extras": {"!has_key": EXTRA_PARENT_PROCESSED}})
 
     for parent_node in qb.iterall():
         parent_node = parent_node[0]
@@ -124,7 +136,7 @@ def scan_and_process(config, logger, no_commit=False):
         ]
 
         if parent_is_broken:
-            if not parent_node.base.extras.get(EXTRA_PARENT_ERROR_SENT, False):
+            if force or not parent_node.base.extras.get(EXTRA_PARENT_ERROR_SENT, False):
                 if base_nodes:
                     # If parent is broken, send actual status for each base workchain
                     for base in base_nodes:
@@ -153,6 +165,9 @@ def scan_and_process(config, logger, no_commit=False):
                                 logger.error(
                                     f"Failed to send ERROR webhook for '{label}'"
                                 )
+                                logger.error(
+                                    f"Cannot process workchain with {label}"
+                                )
                         # else: skip empty label
                     # Mark that the error has been handled (if allowed)
                     if not no_commit:
@@ -177,6 +192,7 @@ def scan_and_process(config, logger, no_commit=False):
                 hierarchy,
                 parent_label,
                 no_commit=no_commit,
+                force=force,
             )
 
         if not no_commit:
@@ -187,7 +203,7 @@ def scan_and_process(config, logger, no_commit=False):
 
 
 # For dry-run testing
-def scan_and_process_dry_run(config, logger):
+def scan_and_process_dry_run(config, logger, force=False):
     # Get parent workchain types from hierarchy keys
     hierarchy = config.get("workchain_hierarchy", {})
     workchain_types = list(hierarchy.keys())
@@ -198,7 +214,8 @@ def scan_and_process_dry_run(config, logger):
         filters={"attributes.process_label": {"in": workchain_types}},
         tag="parent",
     )
-    qb.add_filter("parent", {"extras": {"!has_key": EXTRA_PARENT_PROCESSED}})
+    if not force:
+        qb.add_filter("parent", {"extras": {"!has_key": EXTRA_PARENT_PROCESSED}})
 
     for parent_node in qb.iterall():
         parent_node = parent_node[0]
@@ -225,18 +242,20 @@ def scan_and_process_dry_run(config, logger):
             if base_nodes:
                 for base in base_nodes:
                     label = base.label
-                    if label and label.strip():
-                        # Get grandchild types to check from hierarchy
-                        parent_type = base.process_label
-                        grandchild_types = hierarchy.get(parent_label, {}).get(
-                            parent_type, []
-                        )
-                        status = get_node_status(
-                            base, child_types=grandchild_types, logger=logger
-                        )
-                        logger.info(
-                            f"[TEST] Would send webhook for '{label}' (status: {status}, parent failed)"
-                        )
+                if not label or not label.strip():
+                    logger.info(f"Skipping {base.pk} — empty label")
+                    continue
+                    # Get grandchild types to check from hierarchy
+                    parent_type = base.process_label
+                    grandchild_types = hierarchy.get(parent_label, {}).get(
+                        parent_type, []
+                    )
+                    status = get_node_status(
+                        base, child_types=grandchild_types, logger=logger
+                    )
+                    logger.info(
+                        f"[TEST] Would send webhook for '{label}' (status: {status}, parent failed)"
+                    )
             logger.info(
                 f"[TEST] Would mark parent {parent_node.pk} as processed"
             )
@@ -277,6 +296,11 @@ def main():
         help="Send webhooks, but DO NOT set any extras on nodes (useful for recovery or one-off runs).",
     )
     parser.add_argument(
+        "--resend-all",
+        action="store_true",
+        help="Ignore existing extras/markers and resend webhooks for every eligible workchain.",
+    )
+    parser.add_argument(
         "--logging-level",
         "-l",
         dest="logging_level",
@@ -289,6 +313,7 @@ def main():
     # In --no-commit mode, webhooks are sent, but no extras are set on nodes.
     dry_run = args.dry_run
     no_commit = args.no_commit
+    force = args.resend_all
 
     if dry_run and no_commit:
         print(
@@ -317,6 +342,9 @@ def main():
     else:
         mode = "NORMAL"
 
+    if force:
+        mode += " [FORCE]"
+
     logger.info(f"Starting AiiDA MPDS Monitor daemon [{mode}]")
     logger.info(f"Webhook URL: {config.webhook_url}")
     logger.info(f"Poll interval: {config.poll_interval}s")
@@ -328,9 +356,9 @@ def main():
         try:
             if dry_run:
                 # In test mode, we emulate the behavior without sending
-                scan_and_process_dry_run(config, logger)
+                scan_and_process_dry_run(config, logger, force=force)
             else:
-                scan_and_process(config, logger, no_commit=no_commit)
+                scan_and_process(config, logger, no_commit=no_commit, force=force)
         except KeyboardInterrupt:
             logger.info("Shutting down gracefully...")
             break

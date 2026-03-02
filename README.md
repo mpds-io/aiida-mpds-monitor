@@ -75,6 +75,8 @@ Options:
 
   `--dry-run`: Dry-run mode — scans nodes and logs actions but does not send webhooks or mark nodes.
   `--no-commit`: Run and send webhooks, but do not mark processed workflows. For recovery or one-off runs.
+  `--resend-all`: Force sending of every eligible webhook, ignoring any existing `webhook_finished` or
+    `webhook_parent_processed` extras. Useful to recover from missed notifications.
   `--logging-level` / `-l`: Set the runtime logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL). If omitted, the tools default to `ERROR`.
 
 ⚠️ `--dry-run` and `--no-commit` are mutually exclusive - `--dry-run` takes precedence.

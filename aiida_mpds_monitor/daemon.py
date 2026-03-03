@@ -59,16 +59,14 @@ def process_base_workchain(
     """
     label = base_node.label
     if not label or not label.strip():
-        logger.debug(
-            f"Skipping {base_node.process_label} {base_node.pk} — empty label"
-        )
+        logger.debug(f"Skipping {base_node.process_label} {base_node.pk} — empty label")
         return
-    
+
     label = label.strip()
     # Get grandchild types to check from hierarchy
     node_type = base_node.process_label
     grandchild_types = hierarchy.get(parent_label, {}).get(node_type, [])
-    
+
     # Send webhook when state changes or when terminal state is reached
     already_finished = base_node.base.extras.get(EXTRA_PARENT_PROCESSED, False)
 
@@ -76,9 +74,7 @@ def process_base_workchain(
         already_finished = False
 
     if not already_finished:
-        status = get_node_status(
-            base_node, child_types=grandchild_types, logger=logger
-        )
+        status = get_node_status(base_node, child_types=grandchild_types, logger=logger)
 
         if send_webhook(webhook_url, label, status, key=webhook_key):
             if not no_commit:
@@ -93,7 +89,7 @@ def scan_and_process(config, logger, no_commit=False, force=False):
     # Get parent workchain types from hierarchy keys
     hierarchy = config.get("workchain_hierarchy", {})
     workchain_types = list(hierarchy.keys())
-    
+
     # Request ALL parent nodes of the specified type that have not yet been processed.
     # Including those that failed!
     qb = QueryBuilder()
@@ -102,29 +98,21 @@ def scan_and_process(config, logger, no_commit=False, force=False):
         filters={"attributes.process_label": {"in": workchain_types}},
         tag="parent",
     )
-    
+
     # We process only those that are not yet marked as processed
     if not force:
         qb.add_filter("parent", {"extras": {"!has_key": EXTRA_PARENT_PROCESSED}})
-    
+
     for parent_node in qb.iterall():
         parent_node = parent_node[0]
         logger.debug(f"Processing parent workchain {parent_node.pk}")
-        parent_is_broken = (
-            parent_node.is_failed
-            or parent_node.is_excepted
-            or parent_node.is_killed
-        )
+        parent_is_broken = parent_node.is_failed or parent_node.is_excepted or parent_node.is_killed
         called_nodes = parent_node.called
         # Get child workchain types to search for from hierarchy
         parent_label = parent_node.process_label
         child_types = list(hierarchy.get(parent_label, {}).keys())
-        base_nodes = [
-            n
-            for n in called_nodes
-            if isinstance(n, WorkChainNode) and n.process_label in child_types
-        ]
-        
+        base_nodes = [n for n in called_nodes if isinstance(n, WorkChainNode) and n.process_label in child_types]
+
         if parent_is_broken:
             if force or not parent_node.base.extras.get(EXTRA_PARENT_PROCESSED, False):
                 if base_nodes:
@@ -134,9 +122,7 @@ def scan_and_process(config, logger, no_commit=False, force=False):
                         if label and label.strip():
                             # Get grandchild types to check from hierarchy
                             parent_type = base.process_label
-                            grandchild_types = hierarchy.get(
-                                parent_label, {}
-                            ).get(parent_type, [])
+                            grandchild_types = hierarchy.get(parent_label, {}).get(parent_type, [])
                             status = get_node_status(
                                 base,
                                 child_types=grandchild_types,
@@ -155,19 +141,15 @@ def scan_and_process(config, logger, no_commit=False, force=False):
                                 if not no_commit:
                                     parent_node.set_extra(EXTRA_PARENT_PROCESSED, True)
                             else:
-                                logger.error(
-                                    f"Failed to send ERROR webhook for '{label}'"
-                                )
+                                logger.error(f"Failed to send ERROR webhook for '{label}'")
                     # else: skip empty label
                 else:
-                    logger.debug(
-                        f"Parent {parent_node.pk} failed but has no children — nothing to report"
-                    )
+                    logger.debug(f"Parent {parent_node.pk} failed but has no children — nothing to report")
                 # Mark the parent as processed (if allowed)
                 if not no_commit:
                     parent_node.set_extra(EXTRA_PARENT_PROCESSED, True)
                 continue
-        
+
         # Normal processing
         for base_node in base_nodes:
             process_base_workchain(
@@ -179,7 +161,7 @@ def scan_and_process(config, logger, no_commit=False, force=False):
                 parent_label,
                 no_commit=no_commit,
             )
-        
+
         if not no_commit:
             parent_node.set_extra(EXTRA_PARENT_PROCESSED, True)
         logger.info(f"Parent {parent_node.pk} marked as processed")

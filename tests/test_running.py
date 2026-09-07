@@ -14,9 +14,9 @@ from tests.test_notifications import make_node
 NOW = datetime(2026, 9, 7, tzinfo=timezone.utc)
 
 
-def test_running_report_uses_child_labels_descriptions_and_observed_time():
+def test_running_report_uses_exact_webhook_payload_and_observed_time():
     node = make_node()
-    node.label = "BaMnO3/185"
+    node.label = "  BaMnO3/185: Geometry optimization  "
     node.description = "Structure workflow"
     child = make_node(pk=124)
     child.label = "BaMnO3/185: Geometry optimization"
@@ -28,14 +28,16 @@ def test_running_report_uses_child_labels_descriptions_and_observed_time():
     report = tracker.report()
     assert "BaMnO3/185" in report
     assert "Geometry optimization" in report
-    assert "Relax atomic positions and cell" in report
-    assert "PK 124" in report
+    assert "Название: BaMnO3/185: Geometry optimization\n" in report
+    assert "Relax atomic positions and cell" not in report
+    assert "PK 124" not in report
+    assert "Процесс:" not in report
     assert "2 ч 17 мин" in report
     # Creation time and modification time are intentionally not used.
     assert node.base.extras.get(EXTRA_RUNNING)["since"] == NOW.isoformat()
 
 
-def test_threshold_one_attempt_across_polls_and_restart():
+def test_threshold_only_marks_requested_report_across_polls_and_restart():
     node = make_node()
     notifier = MagicMock()
     tracker = RunningNotifications(notifier, hours=2)
@@ -45,11 +47,11 @@ def test_threshold_one_attempt_across_polls_and_restart():
     tracker.observe(node, NOW + timedelta(hours=3))
     tracker.observe(node, NOW + timedelta(hours=4))
     RunningNotifications(notifier, hours=2).observe(node, NOW + timedelta(hours=5))
-    notifier.notify.assert_called_once()
-    assert "RUNNING дольше 2 ч" in notifier.notify.call_args.args[0]
+    notifier.notify.assert_not_called()
+    assert "Превышен порог 2 ч" in tracker.report()
 
 
-def test_nonrunning_resets_interval_and_new_run_can_alert():
+def test_nonrunning_resets_interval():
     node = make_node()
     notifier = MagicMock()
     tracker = RunningNotifications(notifier, hours=1)
@@ -62,7 +64,7 @@ def test_nonrunning_resets_interval_and_new_run_can_alert():
     node.process_state.value = "running"
     tracker.observe(node, NOW + timedelta(hours=4))
     tracker.observe(node, NOW + timedelta(hours=6))
-    assert notifier.notify.call_count == 2
+    notifier.notify.assert_not_called()
 
 
 def test_no_commit_and_new_scan():
@@ -71,7 +73,7 @@ def test_no_commit_and_new_scan():
     tracker.observe(node, NOW)
     tracker.observe(node, NOW + timedelta(hours=2))
     tracker.observe(node, NOW + timedelta(hours=3))
-    tracker.notifier.notify.assert_called_once()
+    tracker.notifier.notify.assert_not_called()
     assert node.base.extras.get(EXTRA_RUNNING) is None
     tracker.begin_scan()
     assert "нет расчётов" in tracker.report()
@@ -87,7 +89,7 @@ def test_disabled_or_invalid_threshold(hours):
     assert "240 ч" in tracker.report()
 
 
-def test_running_notification_failure_is_contained():
+def test_observation_never_calls_delivery():
     notifier = MagicMock()
     notifier.notify.side_effect = RuntimeError("unavailable")
     tracker = RunningNotifications(notifier, hours=1)
@@ -95,7 +97,7 @@ def test_running_notification_failure_is_contained():
     tracker.observe(node, NOW)
     tracker.observe(node, NOW + timedelta(hours=2))
     tracker.observe(node, NOW + timedelta(hours=3))
-    notifier.notify.assert_called_once()
+    notifier.notify.assert_not_called()
 
 
 def update(identifier, text, chat=123):
@@ -151,7 +153,7 @@ def test_loop_serves_current_scan_report_and_continues_mpds():
     reports = []
     notifier.poll_commands.side_effect = lambda report: reports.append(report())
 
-    def observe(config, logger, terminal, running):
+    def observe(config, logger, running):
         running.observe(make_node(), NOW)
 
     with patch.object(daemon, "create_notifier", return_value=notifier), patch.object(
@@ -162,3 +164,33 @@ def test_loop_serves_current_scan_report_and_continues_mpds():
     assert len(reports) == 1
     assert "PK: 123" in reports[0]
     assert "RUNNING: не менее 0 ч 0 мин" in reports[0]
+
+
+@pytest.mark.parametrize("state", ["finished", "excepted", "killed", "waiting", "created"])
+def test_report_excludes_nonrunning_nodes(state):
+    tracker = RunningNotifications(MagicMock())
+    tracker.observe(make_node(state, 0), NOW)
+    assert "нет расчётов" in tracker.report()
+    tracker.notifier.notify.assert_not_called()
+
+
+def test_monitor_without_commands_sends_no_telegram_messages():
+    notifier = TelegramNotifier("secret", "123")
+
+    def observe(config, logger, running):
+        node = make_node()
+        running.observe(node, NOW)
+        running.observe(node, NOW + timedelta(hours=100))
+        running.observe(make_node("finished", 0, pk=2), NOW)
+
+    with patch.object(daemon, "create_notifier", return_value=notifier), patch.object(
+        daemon, "scan_notifications", side_effect=observe
+    ), patch.object(daemon, "scan_and_process", side_effect=KeyboardInterrupt), patch(
+        "aiida_mpds_monitor.notifications.requests.post"
+    ) as post:
+        post.return_value.json.return_value = {"ok": True, "result": []}
+        daemon.run_monitor_loop(
+            AttributeDict({**DEFAULT_CONFIG, "running_alert_hours": 1}), MagicMock()
+        )
+    post.assert_called_once()
+    assert post.call_args.args[0].endswith("/getUpdates")

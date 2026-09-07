@@ -248,7 +248,7 @@ more verbose). The existing YAML controls polling and which processes to watch:
 
 ```yaml
 poll_interval: 30
-running_alert_hours: 24  # null (default) disables long-running alerts
+running_alert_hours: 24  # null (default) disables the long-running report marker
 monitor_filters:
   max_age_hours: 168
 workchain_hierarchy:
@@ -257,71 +257,48 @@ workchain_hierarchy:
       - CrystalParallelCalculation
 ```
 
-You receive terminal events for configured parents, child workchains, and
-grandchild calculations: successful completion, nonzero-exit failure, killed,
-and excepted. Messages include PK, process name, native state, exit status,
-and computer when available. Each process reports its own outcome; a child
-failure does not rewrite its parent's native state. Running/waiting processes
-do not generate terminal-event messages. You can also enable long-running alerts
-as described below. Daemon-error alerts are not included.
+### Reports by command or button
 
-The daemon checks notifications once per loop, including parents already marked
-as processed by MPDS. It applies the parent creation-time filters and child
-compound filters. A parent qualifies if its label or an included child matches.
-On first enabling notifications, you also receive terminal events for existing
-matching nodes. Use creation-time filters to limit this initial history and the
-number of nodes scanned. Each loop sleeps for `poll_interval` after its work;
-HTTP requests add to the time between scans.
+The bot sends calculation information **only in response to a request**.
+Send `/start` to display the **Текущие расчёты** button, then press it or send
+`/running`. The daemon does not send automatic completion, failure, or
+long-running notifications.
 
-For duplicate prevention, the daemon records the terminal event in the AiiDA
-extra `monitor_notification_state` **before** attempting delivery. Repeated polls,
-restarts, and `--resend-all` do not repeat that event. Run one notifying daemon
-per profile: the extras check and write are not an atomic lock between daemons.
+Reports include only configured child workchains whose native AiiDA state is
+`running`. These are the workchains used for MPDS webhook payloads. Each entry
+contains the PK, RUNNING duration, and a name equal to `node.label.strip()`:
+exactly the value passed as the webhook's `payload`. The bot does not substitute
+`process_label` or list parent/grandchild nodes. It skips empty labels and applies
+the existing hierarchy, parent creation-time filters, and child compound filters.
+MPDS delivery markers do not exclude a running workchain from the report.
 
-Delivery uses the existing `requests` dependency and HTTPS
-[sendMessage](https://core.telegram.org/bots/api#sendmessage) with a 10-second
-timeout. The daemon logs failures and continues monitoring. It does not retry
-failed attempts, because a timeout can occur after Telegram accepts a message.
-A network failure or crash between recording and sending can therefore lose an
-alert. This is best-effort delivery with duplicate prevention, not guaranteed
-delivery.
+For example:
 
-`--dry-run` sends no notifications and writes no notification extras.
-`--no-commit` deduplicates in memory only, so restarting in that mode can repeat
-messages. The one-shot `aiida-mpds-submit` command does not send Telegram alerts.
+```text
+Название: BaMnO3/185: Geometry optimization
+PK: 123456
+RUNNING: не менее 25 ч 17 мин
+⏳ Превышен порог 24 ч
+```
 
-### Current calculations and long-running alerts
-
-Send `/start` to display the **Текущие расчёты** button. Press it or send
-`/running` to request a report of the monitored nodes currently in RUNNING.
-The report includes each node's PK, process type, AiiDA `label`, `description`,
-and observed RUNNING duration. For workchains it also includes direct child
-labels and descriptions, preserving the workflow's own wording. Long reports
-arrive as multiple messages. Parent and child processes have separate entries
-when both are RUNNING. The same hierarchy and filters used for notifications
-apply to these reports.
-
-The bot accepts requests only from the numeric chat ID configured through
-`TELEGRAM_CHAT_ID` or YAML.
-In a group, any member of that configured chat can request a report. The daemon
-uses [getUpdates](https://core.telegram.org/bots/api#getupdates) once per scan;
-allow the scan duration plus `poll_interval` for a response. Use a bot without
-an active Telegram webhook and run only one consumer of its updates. Update
-offsets live in memory; a restart may repeat an unacknowledged command response.
-
-To enable automatic alerts, set this in
-`~/.aiida/aiida_mpds_monitor/conf.yaml`, then restart the daemon:
+To mark long-running workchains within a requested report, configure:
 
 ```yaml
 running_alert_hours: 24
 ```
 
-Positive fractional hours, such as `0.5`, are supported. Use `null` to disable
-these alerts. Invalid values produce a warning and disable the threshold.
-You receive one alert per observed RUNNING interval when its duration exceeds
-the threshold, using the same message details and best-effort delivery policy
-as terminal alerts. Changing the threshold does not repeat an alert already
-attempted for that interval.
+Restart the daemon after changing this setting. Positive fractional hours, such
+as `0.5`, are supported; `null` disables the marker. This setting never triggers
+an unsolicited message, including when retained from an older configuration.
+
+The bot accepts requests only from the numeric chat ID configured through
+`TELEGRAM_CHAT_ID` or YAML. In a group, any member of that configured chat can
+request a report. The daemon uses
+[getUpdates](https://core.telegram.org/bots/api#getupdates) once per scan; allow
+the scan duration plus `poll_interval` for a response. Use a bot without an
+active Telegram webhook and run only one consumer of its updates. Update offsets
+live in memory; a restart may repeat an unacknowledged command response.
+Long reports arrive as multiple messages without truncation.
 
 AiiDA's current process state does not supply a timestamp for entry into RUNNING.
 The monitor records its first RUNNING observation in the extra
@@ -333,6 +310,12 @@ only. Observing any other state resets the interval. State changes between
 polls or while the monitor is stopped cannot be reconstructed; durations assume
 the RUNNING interval continued between observations. This measures AiiDA's
 RUNNING state, not scheduler wall time or CPU usage.
+
+`--dry-run` sends no Telegram requests and writes no tracking extras.
+The one-shot `aiida-mpds-submit` command does not send Telegram messages.
+Network/API failures are logged without stopping MPDS monitoring; requests use
+an HTTP timeout of 10 seconds. Existing webhook and archive processing continues
+independently of bot requests.
 
 ## Testing with Stub Server
 

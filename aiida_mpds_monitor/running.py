@@ -25,7 +25,7 @@ class RunningNotifications:
                     raise ValueError
                 self.hours = value
             except (TypeError, ValueError):
-                logger.warning("running_alert_hours must be positive; RUNNING alerts disabled")
+                logger.warning("running_alert_hours must be positive; RUNNING threshold disabled")
         self.no_commit = no_commit
         self._intervals: dict[str, dict] = {}
         self._current: dict[str, str] = {}
@@ -50,12 +50,9 @@ class RunningNotifications:
             since = datetime.fromisoformat(interval["since"])
             seconds = max(0, (now - since).total_seconds())
             message = self._describe(node, seconds)
+            if self.hours is not None and seconds > self.hours * 3600:
+                message += f"\n⏳ Превышен порог {self.hours:g} ч"
             self._current[node.uuid] = message
-            if self.hours is not None and seconds > self.hours * 3600 and not interval["alerted"]:
-                self._save(node, {**interval, "alerted": True})
-                self.notifier.notify(
-                    f"⏳ RUNNING дольше {self.hours:g} ч\n\n{message}"
-                )
         except Exception:
             logger.warning("Could not track RUNNING interval for PK %s", getattr(node, "pk", None))
 
@@ -68,18 +65,8 @@ class RunningNotifications:
     @staticmethod
     def _describe(node: ProcessNode, seconds: float) -> str:
         minutes = int(seconds // 60)
-        lines = [f"PK: {node.pk}", f"Процесс: {node.process_label}"]
-        for name, value in [("Название", node.label),
-                            ("Описание", getattr(node, "description", None))]:
-            if value:
-                lines.append(f"{name}: {value}")
+        lines = [f"Название: {node.label.strip()}", f"PK: {node.pk}"]
         lines.append(f"RUNNING: не менее {minutes // 60} ч {minutes % 60} мин")
-        for child in node.called:
-            details = [str(value) for value in (
-                getattr(child, "label", None), getattr(child, "description", None)
-            ) if value]
-            if details:
-                lines.append(f"Дочерняя нода PK {child.pk}: " + "\n".join(details))
         return "\n".join(lines)
 
     def report(self) -> str:

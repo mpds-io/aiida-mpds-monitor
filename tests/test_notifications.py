@@ -154,7 +154,7 @@ def test_environment_overrides_yaml_per_setting(monkeypatch):
     notifier.assert_called_once_with("env-token", "123")
 
 
-def test_scan_includes_processed_parents_and_configured_descendants():
+def test_report_scan_tracks_only_webhook_children_even_if_parent_processed():
     parent, child, calc = make_node("finished", 0, 1), make_node("killed", pk=2), make_node(
         "excepted", pk=3
     )
@@ -165,18 +165,15 @@ def test_scan_includes_processed_parents_and_configured_descendants():
     config = AttributeDict({**DEFAULT_CONFIG, "workchain_hierarchy": {
         "Parent": {"Child": ["Calculation"]},
     }})
-    notifier = MagicMock()
-    tracker = StateNotifications(notifier)
     running = MagicMock()
     with patch.object(daemon, "QueryBuilder") as qb, patch.object(
         daemon, "WorkChainNode", SimpleNamespace
     ):
         qb.return_value.iterall.side_effect = lambda: iter([(parent,)])
-        daemon.scan_notifications(config, MagicMock(), tracker, running)
-        daemon.scan_notifications(config, MagicMock(), tracker, running)
-    assert notifier.notify.call_count == 3
+        daemon.scan_notifications(config, MagicMock(), running)
+        daemon.scan_notifications(config, MagicMock(), running)
     assert [call.args[0] for call in running.observe.call_args_list] == [
-        parent, child, calc, parent, child, calc,
+        child, child,
     ]
     qb.return_value.add_filter.assert_not_called()
 

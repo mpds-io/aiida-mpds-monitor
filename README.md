@@ -264,13 +264,14 @@ Send `/start` to display the **Текущие расчёты** button, then pres
 `/running`. The daemon does not send automatic completion, failure, or
 long-running notifications.
 
-Reports follow `workchain_hierarchy` in the loaded AiiDA profile: configured
-parents, their configured children, and the configured calculations under those
-children. Each level is eligible for the report when its own native
-`process_state` is `running`. A waiting parent or child does not prevent a RUNNING
-descendant from appearing. A matching process type outside the configured
-parent/child path is not included. Telegram reports ignore `monitor_filters`
-and MPDS delivery markers; normal MPDS webhook/archive filters remain unchanged.
+Reports select process types listed anywhere in `workchain_hierarchy`: parent
+keys, child keys, and calculation labels in the lists. The daemon queries
+`ProcessNode` directly for these types with native `process_state = running`;
+call-link depth and the existence/state of parent nodes do not restrict the
+report. For example, a RUNNING `CrystalParallelCalculation` appears whenever
+that type is listed in the hierarchy. Unlisted process types do not appear.
+Telegram reports ignore `monitor_filters` and MPDS delivery markers; normal
+MPDS webhook/archive filters remain unchanged.
 
 Each entry contains the node's PK, observed RUNNING duration, and its own
 `label.strip()`. A node with an empty label remains in the report with

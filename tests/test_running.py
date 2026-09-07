@@ -194,3 +194,13 @@ def test_monitor_without_commands_sends_no_telegram_messages():
         )
     post.assert_called_once()
     assert post.call_args.args[0].endswith("/getUpdates")
+
+
+def test_timer_storage_failure_does_not_hide_running_calculation():
+    node = make_node()
+    node.base.extras.get = MagicMock(side_effect=RuntimeError("storage unavailable"))
+    tracker = RunningNotifications(MagicMock())
+    tracker.observe(node, NOW)
+    assert "PK: 123" in tracker.report()
+    assert "RUNNING: длительность недоступна" in tracker.report()
+    assert "нет расчётов" not in tracker.report()

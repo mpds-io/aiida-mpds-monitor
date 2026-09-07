@@ -5,7 +5,7 @@ import sys
 import time
 
 from aiida import load_profile
-from aiida.orm import QueryBuilder, WorkChainNode
+from aiida.orm import ProcessNode, QueryBuilder, WorkChainNode
 
 from .config import get_archive_key, get_auth_key, load_config, resolve_archive_upload_url
 from .filters import (
@@ -20,7 +20,7 @@ from .filters import (
 )
 from .generate_archive import generate_parent_archive
 from .notifications import create_notifier
-from .running import RunningNotifications
+from .running import EXTRA_RUNNING, RunningNotifications
 from .status import (
     base_has_ready_children,
     EXTRA_ARCHIVE_PROCESSED,
@@ -506,27 +506,24 @@ def scan_and_process_dry_run(config, logger, force=False):
 
 
 def scan_notifications(config, logger, running: RunningNotifications) -> None:
-    """Track all configured hierarchy levels, without applying MPDS delivery filters."""
+    """Find configured process types directly, regardless of their call-link depth."""
     hierarchy = config.get("workchain_hierarchy", {})
+    labels = set(hierarchy)
+    for children in hierarchy.values():
+        labels.update(children)
+        for calculations in children.values():
+            labels.update(calculations)
     qb = QueryBuilder()
-    qb.append(WorkChainNode, filters={"attributes.process_label": {"in": list(hierarchy)}})
-    seen = set()
-
-    def observe(node):
-        if node.uuid not in seen:
-            seen.add(node.uuid)
-            running.observe(node)
-
-    for (parent,) in qb.iterall():
-        observe(parent)
-        children = hierarchy.get(parent.process_label, {})
-        for child in parent.called:
-            if child.process_label not in children:
-                continue
-            observe(child)
-            for calc in child.called:
-                if calc.process_label in children[child.process_label]:
-                    observe(calc)
+    qb.append(ProcessNode, filters={"and": [
+        {"attributes.process_label": {"in": sorted(labels)}},
+        {"or": [
+            {"attributes.process_state": "running"},
+            # Revisit tracked nodes to reset intervals when they leave RUNNING.
+            {"extras": {"has_key": EXTRA_RUNNING}},
+        ]},
+    ]})
+    for (node,) in qb.iterall():
+        running.observe(node)
     running.finish_scan()
 
 

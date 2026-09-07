@@ -155,59 +155,34 @@ def test_environment_overrides_yaml_per_setting(monkeypatch):
     notifier.assert_called_once_with("env-token", "123")
 
 
-def test_report_scan_follows_all_hierarchy_levels_without_mpds_filters():
+def test_report_scan_queries_types_from_all_hierarchy_levels_directly():
     from aiida_mpds_monitor.running import EXTRA_RUNNING, RunningNotifications
 
-    parent, child, calc, excluded = [make_node(pk=pk) for pk in range(1, 5)]
-    parent.process_label = "Parent"
-    child.process_label = "Child"
-    calc.process_label = "Calc"
+    calc = make_node(pk=123)
+    calc.process_label = "CrystalParallelCalculation"
     calc.label = ""
-    excluded.process_label = "Other"
-    finished = make_node("finished", 0, pk=5)
-    finished.process_label = "Calc"
+    # No parent or call links: selection must not depend on their presence.
+    finished = make_node("finished", 0, pk=124)
     finished.base.extras.set(EXTRA_RUNNING, {"since": "2026-09-07T00:00:00+00:00"})
-    # A Calc directly under Parent is not a configured hierarchy path.
-    misplaced = make_node(pk=6)
-    misplaced.process_label = "Calc"
-    parent.called = [child, excluded, misplaced]
-    child.called = [calc, finished, excluded]
-    parent.base.extras.set("webhook_parent_processed", True)
     config = AttributeDict({**DEFAULT_CONFIG, "workchain_hierarchy": {
-        "Parent": {"Child": ["Calc"]},
+        "Parent": {"Child": ["CrystalParallelCalculation"]},
     }, "monitor_filters": {"compounds": ["BaMnO3"]}})
     running = RunningNotifications(MagicMock())
     with patch.object(daemon, "QueryBuilder") as qb:
-        qb.return_value.iterall.return_value = iter([(parent,)])
+        qb.return_value.iterall.return_value = iter([(calc,), (finished,)])
         daemon.scan_notifications(config, MagicMock(), running)
-    qb.return_value.append.assert_called_once_with(daemon.WorkChainNode, filters={
-        "attributes.process_label": {"in": ["Parent"]},
-    })
-    for pk in (1, 2, 3):
-        assert f"PK: {pk}" in running.report()
-    for pk in (4, 5, 6):
-        assert f"PK: {pk}" not in running.report()
+    qb.return_value.append.assert_called_once_with(daemon.ProcessNode, filters={"and": [
+        {"attributes.process_label": {"in": ["Child", "CrystalParallelCalculation", "Parent"]}},
+        {"or": [
+            {"attributes.process_state": "running"},
+            {"extras": {"has_key": EXTRA_RUNNING}},
+        ]},
+    ]})
+    assert "PK: 123" in running.report()
+    assert "PK: 124" not in running.report()
     assert "label не задан" in running.report()
     assert finished.base.extras.get(EXTRA_RUNNING) is None
     running.notifier.notify.assert_not_called()
-
-
-def test_report_scan_finds_running_calc_under_waiting_ancestors():
-    from aiida_mpds_monitor.running import RunningNotifications
-
-    parent, child = make_node("waiting", pk=1), make_node("waiting", pk=2)
-    parent.process_label, child.process_label = "Parent", "Child"
-    calc = make_node(pk=3)
-    parent.called, child.called = [child], [calc]
-    running = RunningNotifications(MagicMock())
-    with patch.object(daemon, "QueryBuilder") as qb:
-        qb.return_value.iterall.return_value = iter([(parent,)])
-        daemon.scan_notifications({"workchain_hierarchy": {
-            "Parent": {"Child": ["Calculation"]},
-        }}, MagicMock(), running)
-    assert "PK: 3" in running.report()
-    assert "PK: 1" not in running.report()
-    assert "PK: 2" not in running.report()
 
 
 def test_notification_scan_failure_does_not_stop_monitoring():

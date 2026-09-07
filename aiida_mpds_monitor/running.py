@@ -39,11 +39,11 @@ class RunningNotifications:
                                if key in self._current}
 
     def observe(self, node: ProcessNode, now: Optional[datetime] = None) -> None:
+        state = getattr(node.process_state, "value", node.process_state)
         try:
             now = now or datetime.now(timezone.utc)
             interval = (self._intervals.get(node.uuid) if self.no_commit else
                         node.base.extras.get(EXTRA_RUNNING, None))
-            state = getattr(node.process_state, "value", node.process_state)
             if state != "running":
                 if self.no_commit:
                     self._intervals.pop(node.uuid, None)
@@ -62,6 +62,11 @@ class RunningNotifications:
             self._current[node.uuid] = message
         except Exception:
             logger.warning("Could not track RUNNING interval for PK %s", getattr(node, "pk", None))
+            if state == "running":
+                self._current[node.uuid] = (
+                    f"Название: {(node.label or '').strip() or '(label не задан)'}\n"
+                    f"PK: {node.pk}\nRUNNING: длительность недоступна"
+                )
 
     def _save(self, node: ProcessNode, interval: dict) -> None:
         if self.no_commit:

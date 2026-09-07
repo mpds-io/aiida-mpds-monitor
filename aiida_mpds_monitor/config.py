@@ -12,6 +12,7 @@ DEFAULT_CONFIG = {
     "webhook_url": "http://localhost:8080",
     "auth_key": "",
     "poll_interval": 30,
+    "running_alert_hours": None,
     "workchain_hierarchy": {
         "MPDSStructureWorkChain": {
             "BaseCrystalWorkChain": ["CrystalParallelCalculation"]

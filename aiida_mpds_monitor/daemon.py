@@ -19,6 +19,8 @@ from .filters import (
     matches_compound_filters,
 )
 from .generate_archive import generate_parent_archive
+from .notifications import StateNotifications, create_notifier
+from .running import RunningNotifications
 from .status import (
     base_has_ready_children,
     EXTRA_ARCHIVE_PROCESSED,
@@ -503,6 +505,42 @@ def scan_and_process_dry_run(config, logger, force=False):
         logger.info(f"[TEST] Would mark parent {parent_node.pk} as processed")
 
 
+def scan_notifications(config, logger, notifications: StateNotifications,
+                       running: RunningNotifications = None) -> None:
+    """Observe configured processes independently of MPDS delivery markers."""
+    hierarchy = config.get("workchain_hierarchy", {})
+    qb = QueryBuilder()
+    qb.append(WorkChainNode, filters=build_parent_query_filters(config, list(hierarchy)))
+    counts = get_allowed_element_counts(config)
+    greater_than = get_element_count_greater_than(config)
+    compounds = get_allowed_compounds(config)
+    elements, elements_match = get_element_filter(config)
+    def observe(node):
+        if running is not None:
+            running.observe(node)
+        notifications.observe(node)
+
+    for (parent,) in qb.iterall():
+        try:
+            children = hierarchy.get(parent.process_label, {})
+            bases = filter_nodes_by_element_count(
+                [node for node in parent.called
+                 if isinstance(node, WorkChainNode) and node.process_label in children],
+                counts, logger, greater_than, compounds, elements, elements_match,
+            )
+            if bases or matches_compound_filters(
+                parent.label or "", counts, greater_than, compounds, elements, elements_match
+            ):
+                observe(parent)
+            for base in bases:
+                observe(base)
+                for calc in base.called:
+                    if calc.process_label in children[base.process_label]:
+                        observe(calc)
+        except Exception:
+            logger.warning("Could not scan notifications for parent PK %s", parent.pk)
+
+
 def run_monitor_loop(config, logger, dry_run=False, no_commit=False, force=False):
     """Run monitor scans continuously.
 
@@ -510,12 +548,23 @@ def run_monitor_loop(config, logger, dry_run=False, no_commit=False, force=False
     ``--resend-all`` a one-shot replay instead of resending the same webhooks
     after every poll interval.
     """
+    notifier = None if dry_run else create_notifier()
+    notifications = StateNotifications(notifier, no_commit=no_commit) if notifier else None
+    running = (RunningNotifications(notifier, config.get("running_alert_hours"), no_commit)
+               if notifier else None)
     while True:
         try:
             if dry_run:
                 # In test mode, we emulate the behavior without sending
                 scan_and_process_dry_run(config, logger, force=force)
             else:
+                if notifications is not None:
+                    try:
+                        running.begin_scan()
+                        scan_notifications(config, logger, notifications, running)
+                        notifier.poll_commands(running.report)
+                    except Exception:
+                        logger.warning("Notification scan failed; continuing MPDS monitoring")
                 scan_and_process(config, logger, no_commit=no_commit, force=force)
 
             if force:

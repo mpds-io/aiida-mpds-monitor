@@ -59,7 +59,7 @@ def test_nonrunning_resets_interval():
     tracker.observe(node, NOW + timedelta(hours=2))
     node.process_state.value = "waiting"
     tracker.observe(node, NOW + timedelta(hours=3))
-    assert node.base.extras.get(EXTRA_RUNNING) == {}
+    assert node.base.extras.get(EXTRA_RUNNING) is None
     assert "нет расчётов" in tracker.report()
     node.process_state.value = "running"
     tracker.observe(node, NOW + timedelta(hours=4))

@@ -264,13 +264,19 @@ Send `/start` to display the **Текущие расчёты** button, then pres
 `/running`. The daemon does not send automatic completion, failure, or
 long-running notifications.
 
-Reports include only configured child workchains whose native AiiDA state is
-`running`. These are the workchains used for MPDS webhook payloads. Each entry
-contains the PK, RUNNING duration, and a name equal to `node.label.strip()`:
-exactly the value passed as the webhook's `payload`. The bot does not substitute
-`process_label` or list parent/grandchild nodes. It skips empty labels and applies
-the existing hierarchy, parent creation-time filters, and child compound filters.
-MPDS delivery markers do not exclude a running workchain from the report.
+Reports follow `workchain_hierarchy` in the loaded AiiDA profile: configured
+parents, their configured children, and the configured calculations under those
+children. Each level is eligible for the report when its own native
+`process_state` is `running`. A waiting parent or child does not prevent a RUNNING
+descendant from appearing. A matching process type outside the configured
+parent/child path is not included. Telegram reports ignore `monitor_filters`
+and MPDS delivery markers; normal MPDS webhook/archive filters remain unchanged.
+
+Each entry contains the node's PK, observed RUNNING duration, and its own
+`label.strip()`. A node with an empty label remains in the report with
+`(label не задан)` as its name. Processes in `waiting` or other states are not
+included, even if an associated scheduler job is active. The daemon must use
+the same AiiDA profile as the calculations you want to inspect.
 
 For example:
 
@@ -281,7 +287,7 @@ RUNNING: не менее 25 ч 17 мин
 ⏳ Превышен порог 24 ч
 ```
 
-To mark long-running workchains within a requested report, configure:
+To mark long-running processes within a requested report, configure:
 
 ```yaml
 running_alert_hours: 24

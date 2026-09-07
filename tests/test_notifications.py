@@ -27,6 +27,7 @@ def make_node(state="running", exit_status=None, pk=123):
         computer=SimpleNamespace(label="cluster01"), called=[],
         base=SimpleNamespace(extras=SimpleNamespace(
             get=extras.get, set=lambda key, value: extras.__setitem__(key, value),
+            delete=lambda key: extras.pop(key, None),
         )),
     )
 
@@ -154,28 +155,59 @@ def test_environment_overrides_yaml_per_setting(monkeypatch):
     notifier.assert_called_once_with("env-token", "123")
 
 
-def test_report_scan_tracks_only_webhook_children_even_if_parent_processed():
-    parent, child, calc = make_node("finished", 0, 1), make_node("killed", pk=2), make_node(
-        "excepted", pk=3
-    )
-    parent.process_label, child.process_label = "Parent", "Child"
-    parent.called, child.called = [child], [calc, make_node(pk=4)]
-    child.called[1].process_label = "Unconfigured"
+def test_report_scan_follows_all_hierarchy_levels_without_mpds_filters():
+    from aiida_mpds_monitor.running import EXTRA_RUNNING, RunningNotifications
+
+    parent, child, calc, excluded = [make_node(pk=pk) for pk in range(1, 5)]
+    parent.process_label = "Parent"
+    child.process_label = "Child"
+    calc.process_label = "Calc"
+    calc.label = ""
+    excluded.process_label = "Other"
+    finished = make_node("finished", 0, pk=5)
+    finished.process_label = "Calc"
+    finished.base.extras.set(EXTRA_RUNNING, {"since": "2026-09-07T00:00:00+00:00"})
+    # A Calc directly under Parent is not a configured hierarchy path.
+    misplaced = make_node(pk=6)
+    misplaced.process_label = "Calc"
+    parent.called = [child, excluded, misplaced]
+    child.called = [calc, finished, excluded]
     parent.base.extras.set("webhook_parent_processed", True)
     config = AttributeDict({**DEFAULT_CONFIG, "workchain_hierarchy": {
-        "Parent": {"Child": ["Calculation"]},
-    }})
-    running = MagicMock()
-    with patch.object(daemon, "QueryBuilder") as qb, patch.object(
-        daemon, "WorkChainNode", SimpleNamespace
-    ):
-        qb.return_value.iterall.side_effect = lambda: iter([(parent,)])
+        "Parent": {"Child": ["Calc"]},
+    }, "monitor_filters": {"compounds": ["BaMnO3"]}})
+    running = RunningNotifications(MagicMock())
+    with patch.object(daemon, "QueryBuilder") as qb:
+        qb.return_value.iterall.return_value = iter([(parent,)])
         daemon.scan_notifications(config, MagicMock(), running)
-        daemon.scan_notifications(config, MagicMock(), running)
-    assert [call.args[0] for call in running.observe.call_args_list] == [
-        child, child,
-    ]
-    qb.return_value.add_filter.assert_not_called()
+    qb.return_value.append.assert_called_once_with(daemon.WorkChainNode, filters={
+        "attributes.process_label": {"in": ["Parent"]},
+    })
+    for pk in (1, 2, 3):
+        assert f"PK: {pk}" in running.report()
+    for pk in (4, 5, 6):
+        assert f"PK: {pk}" not in running.report()
+    assert "label не задан" in running.report()
+    assert finished.base.extras.get(EXTRA_RUNNING) is None
+    running.notifier.notify.assert_not_called()
+
+
+def test_report_scan_finds_running_calc_under_waiting_ancestors():
+    from aiida_mpds_monitor.running import RunningNotifications
+
+    parent, child = make_node("waiting", pk=1), make_node("waiting", pk=2)
+    parent.process_label, child.process_label = "Parent", "Child"
+    calc = make_node(pk=3)
+    parent.called, child.called = [child], [calc]
+    running = RunningNotifications(MagicMock())
+    with patch.object(daemon, "QueryBuilder") as qb:
+        qb.return_value.iterall.return_value = iter([(parent,)])
+        daemon.scan_notifications({"workchain_hierarchy": {
+            "Parent": {"Child": ["Calculation"]},
+        }}, MagicMock(), running)
+    assert "PK: 3" in running.report()
+    assert "PK: 1" not in running.report()
+    assert "PK: 2" not in running.report()
 
 
 def test_notification_scan_failure_does_not_stop_monitoring():

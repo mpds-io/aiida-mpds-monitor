@@ -33,6 +33,11 @@ class RunningNotifications:
     def begin_scan(self) -> None:
         self._current.clear()
 
+    def finish_scan(self) -> None:
+        if self.no_commit:
+            self._intervals = {key: value for key, value in self._intervals.items()
+                               if key in self._current}
+
     def observe(self, node: ProcessNode, now: Optional[datetime] = None) -> None:
         try:
             now = now or datetime.now(timezone.utc)
@@ -40,8 +45,10 @@ class RunningNotifications:
                         node.base.extras.get(EXTRA_RUNNING, None))
             state = getattr(node.process_state, "value", node.process_state)
             if state != "running":
-                if interval:
-                    self._save(node, {})
+                if self.no_commit:
+                    self._intervals.pop(node.uuid, None)
+                elif interval is not None:
+                    node.base.extras.delete(EXTRA_RUNNING)
                 self._current.pop(node.uuid, None)
                 return
             if not interval:
@@ -65,11 +72,11 @@ class RunningNotifications:
     @staticmethod
     def _describe(node: ProcessNode, seconds: float) -> str:
         minutes = int(seconds // 60)
-        lines = [f"Название: {node.label.strip()}", f"PK: {node.pk}"]
+        lines = [f"Название: {(node.label or '').strip() or '(label не задан)'}", f"PK: {node.pk}"]
         lines.append(f"RUNNING: не менее {minutes // 60} ч {minutes % 60} мин")
         return "\n".join(lines)
 
     def report(self) -> str:
         if not self._current:
-            return "В выбранной иерархии и фильтрах нет расчётов со статусом RUNNING."
+            return "В workchain_hierarchy текущего профиля AiiDA нет расчётов со статусом RUNNING."
         return "Текущие расчёты AiiDA\n\n" + "\n\n".join(self._current.values())

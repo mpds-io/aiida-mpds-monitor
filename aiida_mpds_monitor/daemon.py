@@ -506,27 +506,28 @@ def scan_and_process_dry_run(config, logger, force=False):
 
 
 def scan_notifications(config, logger, running: RunningNotifications) -> None:
-    """Track webhook child workchains for reports, without sending messages."""
+    """Track all configured hierarchy levels, without applying MPDS delivery filters."""
     hierarchy = config.get("workchain_hierarchy", {})
     qb = QueryBuilder()
-    qb.append(WorkChainNode, filters=build_parent_query_filters(config, list(hierarchy)))
-    counts = get_allowed_element_counts(config)
-    greater_than = get_element_count_greater_than(config)
-    compounds = get_allowed_compounds(config)
-    elements, elements_match = get_element_filter(config)
+    qb.append(WorkChainNode, filters={"attributes.process_label": {"in": list(hierarchy)}})
+    seen = set()
+
+    def observe(node):
+        if node.uuid not in seen:
+            seen.add(node.uuid)
+            running.observe(node)
+
     for (parent,) in qb.iterall():
-        try:
-            children = hierarchy.get(parent.process_label, {})
-            bases = filter_nodes_by_element_count(
-                [node for node in parent.called
-                 if isinstance(node, WorkChainNode) and node.process_label in children],
-                counts, logger, greater_than, compounds, elements, elements_match,
-            )
-            for base in bases:
-                if base.label and base.label.strip():
-                    running.observe(base)
-        except Exception:
-            logger.warning("Could not scan notifications for parent PK %s", parent.pk)
+        observe(parent)
+        children = hierarchy.get(parent.process_label, {})
+        for child in parent.called:
+            if child.process_label not in children:
+                continue
+            observe(child)
+            for calc in child.called:
+                if calc.process_label in children[child.process_label]:
+                    observe(calc)
+    running.finish_scan()
 
 
 def run_monitor_loop(config, logger, dry_run=False, no_commit=False, force=False):

@@ -548,7 +548,7 @@ def run_monitor_loop(config, logger, dry_run=False, no_commit=False, force=False
     ``--resend-all`` a one-shot replay instead of resending the same webhooks
     after every poll interval.
     """
-    notifier = None if dry_run else create_notifier()
+    notifier = None if dry_run else create_notifier(config)
     notifications = StateNotifications(notifier, no_commit=no_commit) if notifier else None
     running = (RunningNotifications(notifier, config.get("running_alert_hours"), no_commit)
                if notifier else None)

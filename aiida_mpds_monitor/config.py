@@ -13,6 +13,8 @@ DEFAULT_CONFIG = {
     "auth_key": "",
     "poll_interval": 30,
     "running_alert_hours": None,
+    "telegram_bot_token": "",
+    "telegram_chat_id": "",
     "workchain_hierarchy": {
         "MPDSStructureWorkChain": {
             "BaseCrystalWorkChain": ["CrystalParallelCalculation"]

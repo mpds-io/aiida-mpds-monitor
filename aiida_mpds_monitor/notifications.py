@@ -3,7 +3,7 @@
 import logging
 import os
 from abc import ABC, abstractmethod
-from typing import Callable, Optional
+from typing import Callable, Mapping, Optional
 
 import requests
 from aiida.orm import ProcessNode
@@ -83,15 +83,23 @@ class TelegramNotifier(Notifier):
             logger.warning("Telegram command polling failed; continuing monitoring")
 
 
-def create_notifier() -> Optional[Notifier]:
-    """Disable cleanly unless both environment settings are present."""
-    token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
-    chat_id = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
+def create_notifier(config: Optional[Mapping] = None) -> Optional[Notifier]:
+    """Resolve Telegram settings from the environment, then YAML configuration."""
+    config = config or {}
+
+    def setting(name: str) -> str:
+        for value in (os.environ.get(name), config.get(name.lower()), config.get(name)):
+            if value is not None and str(value).strip():
+                return str(value).strip()
+        return ""
+
+    token = setting("TELEGRAM_BOT_TOKEN")
+    chat_id = setting("TELEGRAM_CHAT_ID")
     if not token or not chat_id:
         if token or chat_id:
             logger.warning(
                 "Telegram notifications disabled: both TELEGRAM_BOT_TOKEN and "
-                "TELEGRAM_CHAT_ID are required"
+                "TELEGRAM_CHAT_ID are required (environment or YAML configuration)"
             )
         else:
             logger.info("Telegram notifications disabled: no configuration")

@@ -227,8 +227,22 @@ export TELEGRAM_CHAT_ID="<chat-id>"
 aiida-mpds-monitor --logging-level INFO
 ```
 
-Keep the token in your service environment; no Telegram secrets belong in YAML.
-If neither variable is set, notifications stay disabled. If only one is set,
+Alternatively, add the settings to `~/.aiida/aiida_mpds_monitor/conf.yaml`
+(the configuration filename used by this application):
+
+```yaml
+telegram_bot_token: "<token-from-BotFather>"
+telegram_chat_id: "<chat-id>"
+running_alert_hours: 24
+```
+
+The uppercase YAML keys `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` are also
+accepted. For each setting, a nonempty environment value takes priority, followed
+by the lowercase YAML key, then the uppercase YAML key. Restart the daemon after
+editing the configuration. Restrict access to a file containing your token with
+`chmod 600 ~/.aiida/aiida_mpds_monitor/conf.yaml` and keep it out of version control.
+
+If neither setting is provided, notifications stay disabled. If only one is set,
 the daemon logs a startup warning (visible with `--logging-level WARNING` or
 more verbose). The existing YAML controls polling and which processes to watch:
 
@@ -287,7 +301,8 @@ arrive as multiple messages. Parent and child processes have separate entries
 when both are RUNNING. The same hierarchy and filters used for notifications
 apply to these reports.
 
-The bot accepts requests only from the numeric chat ID in `TELEGRAM_CHAT_ID`.
+The bot accepts requests only from the numeric chat ID configured through
+`TELEGRAM_CHAT_ID` or YAML.
 In a group, any member of that configured chat can request a report. The daemon
 uses [getUpdates](https://core.telegram.org/bots/api#getupdates) once per scan;
 allow the scan duration plus `poll_interval` for a response. Use a bot without

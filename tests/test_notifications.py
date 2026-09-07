@@ -134,6 +134,26 @@ def test_environment_configuration(monkeypatch):
     assert isinstance(create_notifier(), TelegramNotifier)
 
 
+@pytest.mark.parametrize("uppercase", [False, True])
+def test_yaml_telegram_configuration(monkeypatch, uppercase):
+    monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
+    monkeypatch.delenv("TELEGRAM_CHAT_ID", raising=False)
+    config = {"telegram_bot_token": "yaml-token", "telegram_chat_id": -123}
+    if uppercase:
+        config = {key.upper(): value for key, value in config.items()}
+    with patch("aiida_mpds_monitor.notifications.TelegramNotifier") as notifier:
+        create_notifier({**DEFAULT_CONFIG, **config})
+    notifier.assert_called_once_with("yaml-token", "-123")
+
+
+def test_environment_overrides_yaml_per_setting(monkeypatch):
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "env-token")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", " ")
+    with patch("aiida_mpds_monitor.notifications.TelegramNotifier") as notifier:
+        create_notifier({"telegram_bot_token": "yaml-token", "telegram_chat_id": 123})
+    notifier.assert_called_once_with("env-token", "123")
+
+
 def test_scan_includes_processed_parents_and_configured_descendants():
     parent, child, calc = make_node("finished", 0, 1), make_node("killed", pk=2), make_node(
         "excepted", pk=3

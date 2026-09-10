@@ -278,7 +278,9 @@ Telegram reports ignore `monitor_filters` and MPDS delivery markers; normal
 MPDS webhook/archive filters remain unchanged.
 
 Each entry contains the node's PK, RUNNING duration, and its own
-`label.strip()`. A node with an empty label remains in the report with
+`label.strip()`. For YaScheduler jobs, it also includes the assigned
+`node.hostname` from `yastatus --json` when that field is available. A node
+with an empty label remains in the report with
 `(label не задан)` as its name. It does not expose the internal AiiDA `waiting`
 state for an executing scheduler job. Queued and terminal calculations are
 excluded. The daemon must use the same AiiDA profile as the calculations you
@@ -289,6 +291,7 @@ For example:
 ```text
 Название: BaMnO3/185: Geometry optimization
 PK: 123456
+Hostname: compute-17
 RUNNING: не менее 25 ч 17 мин
 ⏳ Превышен порог 24 ч
 ```

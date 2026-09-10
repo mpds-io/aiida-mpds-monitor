@@ -6,6 +6,7 @@ import math
 import shutil
 import subprocess
 import sys
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable, Optional
@@ -16,6 +17,14 @@ from .notifications import Notifier
 
 logger = logging.getLogger(__name__)
 EXTRA_RUNNING = "monitor_running_interval"
+
+
+@dataclass(frozen=True)
+class RunningDetails:
+    """Scheduler details available for a currently executing process."""
+
+    running_since: Optional[datetime] = None
+    hostname: Optional[str] = None
 
 
 def _aware(value: datetime) -> datetime:
@@ -31,11 +40,11 @@ def _yastatus_executable() -> str:
     return shutil.which("yastatus") or "yastatus"
 
 
-def resolve_running_since(
+def resolve_running_details(
     nodes: Iterable[ProcessNode], logger_: logging.Logger = logger
-) -> dict[str, datetime]:
-    """Resolve scheduler start times without making report generation depend on them."""
-    result = {}
+) -> dict[str, RunningDetails]:
+    """Resolve scheduler start times and hostnames when the plugin exposes them."""
+    result: dict[str, RunningDetails] = {}
     yascheduler_nodes = {}
     for node in nodes:
         try:
@@ -43,8 +52,7 @@ def resolve_running_since(
             info = info_getter() if callable(info_getter) else None
             dispatch_time = getattr(info, "dispatch_time", None)
             if dispatch_time is not None:
-                result[node.uuid] = _aware(dispatch_time)
-                continue
+                result[node.uuid] = RunningDetails(running_since=_aware(dispatch_time))
 
             computer = getattr(node, "computer", None)
             if getattr(computer, "scheduler_type", None) == "yascheduler":
@@ -76,14 +84,36 @@ def resolve_running_since(
                 continue
             node = yascheduler_nodes.get(str(task.get("task_id")))
             updated_at = task.get("updated_at")
-            if node is not None and updated_at:
-                result[node.uuid] = _aware(datetime.fromisoformat(updated_at))
+            if node is None:
+                continue
+            previous = result.get(node.uuid, RunningDetails())
+            running_since = previous.running_since
+            if updated_at:
+                running_since = _aware(datetime.fromisoformat(updated_at))
+            task_node = task.get("node")
+            hostname = task_node.get("hostname") if isinstance(task_node, dict) else None
+            hostname = hostname.strip() if isinstance(hostname, str) else None
+            result[node.uuid] = RunningDetails(
+                running_since=running_since,
+                hostname=hostname or None,
+            )
     except (OSError, subprocess.SubprocessError, ValueError, TypeError) as exc:
         logger_.warning(
             "Could not resolve YaScheduler RUNNING timestamps (%s)",
             type(exc).__name__,
         )
     return result
+
+
+def resolve_running_since(
+    nodes: Iterable[ProcessNode], logger_: logging.Logger = logger
+) -> dict[str, datetime]:
+    """Return scheduler start times for compatibility with existing callers."""
+    return {
+        uuid: details.running_since
+        for uuid, details in resolve_running_details(nodes, logger_).items()
+        if details.running_since is not None
+    }
 
 
 def running_source(node: ProcessNode) -> Optional[str]:
@@ -138,6 +168,7 @@ class RunningNotifications:
         node: ProcessNode,
         now: Optional[datetime] = None,
         running_since: Optional[datetime] = None,
+        hostname: Optional[str] = None,
     ) -> None:
         source = running_source(node)
         try:
@@ -165,17 +196,21 @@ class RunningNotifications:
                     interval = {"since": since.isoformat(), "source": source}
                     self._save(node, interval)
             seconds = max(0, (now - since).total_seconds())
-            message = self._describe(node, seconds, source)
+            message = self._describe(node, seconds, source, hostname)
             if self.hours is not None and seconds > self.hours * 3600:
                 message += f"\n⏳ Превышен порог {self.hours:g} ч"
             self._record(node.uuid, message)
         except Exception:
             logger.warning("Could not track RUNNING interval for PK %s", getattr(node, "pk", None))
             if source is not None:
-                self._record(node.uuid, (
-                    f"Название: {(node.label or '').strip() or '(label не задан)'}\n"
-                    f"PK: {node.pk}\nRUNNING: длительность недоступна"
-                ))
+                lines = [
+                    f"Название: {(node.label or '').strip() or '(label не задан)'}",
+                    f"PK: {node.pk}",
+                ]
+                if hostname:
+                    lines.append(f"Hostname: {hostname}")
+                lines.append("RUNNING: длительность недоступна")
+                self._record(node.uuid, "\n".join(lines))
 
     def _save(self, node: ProcessNode, interval: dict) -> None:
         if self.no_commit:
@@ -184,9 +219,16 @@ class RunningNotifications:
             node.base.extras.set(EXTRA_RUNNING, interval)
 
     @staticmethod
-    def _describe(node: ProcessNode, seconds: float, source: str = "process") -> str:
+    def _describe(
+        node: ProcessNode,
+        seconds: float,
+        source: str = "process",
+        hostname: Optional[str] = None,
+    ) -> str:
         minutes = int(seconds // 60)
         lines = [f"Название: {(node.label or '').strip() or '(label не задан)'}", f"PK: {node.pk}"]
+        if hostname:
+            lines.append(f"Hostname: {hostname}")
         lines.append(f"RUNNING: не менее {minutes // 60} ч {minutes % 60} мин")
         return "\n".join(lines)
 

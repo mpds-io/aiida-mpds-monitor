@@ -14,6 +14,7 @@ from aiida_mpds_monitor.running import (
     EXTRA_RUNNING,
     RunningNotifications,
     _yastatus_executable,
+    resolve_running_details,
     resolve_running_since,
 )
 from tests.test_notifications import make_node
@@ -292,6 +293,14 @@ def test_authoritative_running_since_replaces_first_observation():
     assert node.base.extras.get(EXTRA_RUNNING)["since"] == actual_start.isoformat()
 
 
+def test_running_report_includes_scheduler_hostname_when_available():
+    node = make_node("waiting")
+    node.get_scheduler_state = lambda: "running"
+    tracker = RunningNotifications(MagicMock())
+    tracker.observe(node, NOW, hostname="compute-17")
+    assert "PK: 123\nHostname: compute-17\nRUNNING:" in tracker.report()
+
+
 def test_resolve_running_since_uses_generic_dispatch_time():
     node = make_node("waiting")
     dispatch_time = NOW - timedelta(hours=3)
@@ -306,14 +315,18 @@ def test_resolve_running_since_uses_yascheduler_updated_at():
     node.get_last_job_info = lambda: SimpleNamespace(dispatch_time=None)
     output = (
         '[{"task_id": 10050, "status": "RUNNING", '
-        '"updated_at": "2026-09-06T11:32:47+02:00"}]'
+        '"updated_at": "2026-09-06T11:32:47+02:00", '
+        '"node": {"hostname": "worker-05"}}]'
     )
     with patch(
         "aiida_mpds_monitor.running._yastatus_executable", return_value="/venv/bin/yastatus"
     ), patch("aiida_mpds_monitor.running.subprocess.run") as run:
         run.return_value = SimpleNamespace(returncode=0, stdout=output)
-        result = resolve_running_since([node])
-    assert result[node.uuid] == datetime.fromisoformat("2026-09-06T11:32:47+02:00")
+        result = resolve_running_details([node])
+    assert result[node.uuid].running_since == datetime.fromisoformat(
+        "2026-09-06T11:32:47+02:00"
+    )
+    assert result[node.uuid].hostname == "worker-05"
     run.assert_called_once_with(
         ["/venv/bin/yastatus", "--jobs", "10050", "--json"],
         capture_output=True,
@@ -321,6 +334,21 @@ def test_resolve_running_since_uses_yascheduler_updated_at():
         text=True,
         timeout=15,
     )
+
+
+def test_resolve_running_details_omits_unassigned_yascheduler_hostname():
+    node = make_node("waiting")
+    node.computer.scheduler_type = "yascheduler"
+    node.base.attributes = SimpleNamespace(get=lambda key, default=None: "10050")
+    node.get_last_job_info = lambda: None
+    output = (
+        '[{"task_id": 10050, "status": "RUNNING", '
+        '"updated_at": "2026-09-06T11:32:47+02:00", "node": null}]'
+    )
+    with patch("aiida_mpds_monitor.running.subprocess.run") as run:
+        run.return_value = SimpleNamespace(returncode=0, stdout=output)
+        details = resolve_running_details([node])[node.uuid]
+    assert details.hostname is None
 
 
 @pytest.mark.parametrize("failure", ["exit", "invalid", "timeout"])

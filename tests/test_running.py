@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -8,7 +9,11 @@ from aiida.common.extendeddicts import AttributeDict
 from aiida_mpds_monitor import daemon
 from aiida_mpds_monitor.config import DEFAULT_CONFIG
 from aiida_mpds_monitor.notifications import TelegramNotifier
-from aiida_mpds_monitor.running import EXTRA_RUNNING, RunningNotifications
+from aiida_mpds_monitor.running import (
+    EXTRA_RUNNING,
+    RunningNotifications,
+    resolve_running_since,
+)
 from tests.test_notifications import make_node
 
 NOW = datetime(2026, 9, 7, tzinfo=timezone.utc)
@@ -243,3 +248,59 @@ def test_timer_resets_when_execution_source_changes():
     node.get_scheduler_state = lambda: "queued"
     tracker.observe(node, NOW + timedelta(hours=6))
     assert "нет расчётов" in tracker.report()
+
+
+def test_authoritative_running_since_replaces_first_observation():
+    node = make_node("waiting")
+    node.get_scheduler_state = lambda: "running"
+    tracker = RunningNotifications(MagicMock())
+    tracker.observe(node, NOW)
+    actual_start = NOW - timedelta(hours=5, minutes=12)
+    tracker.observe(node, NOW, running_since=actual_start)
+    assert "5 ч 12 мин" in tracker.report()
+    assert node.base.extras.get(EXTRA_RUNNING)["since"] == actual_start.isoformat()
+
+
+def test_resolve_running_since_uses_generic_dispatch_time():
+    node = make_node("waiting")
+    dispatch_time = NOW - timedelta(hours=3)
+    node.get_last_job_info = lambda: SimpleNamespace(dispatch_time=dispatch_time)
+    assert resolve_running_since([node]) == {node.uuid: dispatch_time}
+
+
+def test_resolve_running_since_uses_yascheduler_updated_at():
+    node = make_node("waiting")
+    node.computer.scheduler_type = "yascheduler"
+    node.base.attributes = SimpleNamespace(get=lambda key, default=None: "10050")
+    node.get_last_job_info = lambda: SimpleNamespace(dispatch_time=None)
+    output = (
+        '[{"task_id": 10050, "status": "RUNNING", '
+        '"updated_at": "2026-09-06T11:32:47+02:00"}]'
+    )
+    with patch("aiida_mpds_monitor.running.subprocess.run") as run:
+        run.return_value = SimpleNamespace(returncode=0, stdout=output)
+        result = resolve_running_since([node])
+    assert result[node.uuid] == datetime.fromisoformat("2026-09-06T11:32:47+02:00")
+    run.assert_called_once_with(
+        ["yastatus", "--jobs", "10050", "--json"],
+        capture_output=True,
+        check=False,
+        text=True,
+        timeout=15,
+    )
+
+
+@pytest.mark.parametrize("failure", ["exit", "invalid", "timeout"])
+def test_yascheduler_timestamp_failure_falls_back_cleanly(failure):
+    node = make_node("waiting")
+    node.computer.scheduler_type = "yascheduler"
+    node.base.attributes = SimpleNamespace(get=lambda key, default=None: "10050")
+    node.get_last_job_info = lambda: None
+    with patch("aiida_mpds_monitor.running.subprocess.run") as run:
+        if failure == "exit":
+            run.return_value = SimpleNamespace(returncode=1, stdout="")
+        elif failure == "invalid":
+            run.return_value = SimpleNamespace(returncode=0, stdout="invalid")
+        else:
+            run.side_effect = __import__("subprocess").TimeoutExpired("yastatus", 15)
+        assert resolve_running_since([node]) == {}

@@ -20,7 +20,7 @@ from .filters import (
 )
 from .generate_archive import generate_parent_archive
 from .notifications import create_notifier
-from .running import EXTRA_RUNNING, RunningNotifications
+from .running import EXTRA_RUNNING, RunningNotifications, resolve_running_since
 from .status import (
     base_has_ready_children,
     EXTRA_ARCHIVE_PROCESSED,
@@ -526,8 +526,10 @@ def scan_notifications(config, logger, running: RunningNotifications) -> None:
             {"extras": {"has_key": EXTRA_RUNNING}},
         ]},
     ]})
-    for (node,) in qb.iterall():
-        running.observe(node)
+    nodes = [node for (node,) in qb.iterall()]
+    running_since = resolve_running_since(nodes, logger)
+    for node in nodes:
+        running.observe(node, running_since=running_since.get(node.uuid))
     running.finish_scan()
 
 

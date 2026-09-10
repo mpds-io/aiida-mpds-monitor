@@ -1,9 +1,11 @@
 """Track observed RUNNING intervals without relying on node creation/modification time."""
 
+import json
 import logging
 import math
+import subprocess
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Iterable, Optional
 
 from aiida.orm import ProcessNode
 
@@ -11,6 +13,60 @@ from .notifications import Notifier
 
 logger = logging.getLogger(__name__)
 EXTRA_RUNNING = "monitor_running_interval"
+
+
+def _aware(value: datetime) -> datetime:
+    """Return an aware datetime; AiiDA timestamps are UTC when timezone is absent."""
+    return value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+
+
+def resolve_running_since(
+    nodes: Iterable[ProcessNode], logger_: logging.Logger = logger
+) -> dict[str, datetime]:
+    """Resolve scheduler start times without making report generation depend on them."""
+    result = {}
+    yascheduler_nodes = {}
+    for node in nodes:
+        try:
+            info_getter = getattr(node, "get_last_job_info", None)
+            info = info_getter() if callable(info_getter) else None
+            dispatch_time = getattr(info, "dispatch_time", None)
+            if dispatch_time is not None:
+                result[node.uuid] = _aware(dispatch_time)
+                continue
+
+            computer = getattr(node, "computer", None)
+            if getattr(computer, "scheduler_type", None) == "yascheduler":
+                job_id = node.base.attributes.get("job_id", None)
+                if job_id is not None:
+                    yascheduler_nodes[str(job_id)] = node
+        except Exception:
+            logger_.warning("Could not inspect scheduler timestamps for PK %s", node.pk)
+
+    if not yascheduler_nodes:
+        return result
+
+    try:
+        completed = subprocess.run(
+            ["yastatus", "--jobs", *yascheduler_nodes, "--json"],
+            capture_output=True,
+            check=False,
+            text=True,
+            timeout=15,
+        )
+        if completed.returncode != 0:
+            logger_.warning("YaScheduler timestamp query failed")
+            return result
+        for task in json.loads(completed.stdout):
+            if task.get("status") != "RUNNING":
+                continue
+            node = yascheduler_nodes.get(str(task.get("task_id")))
+            updated_at = task.get("updated_at")
+            if node is not None and updated_at:
+                result[node.uuid] = _aware(datetime.fromisoformat(updated_at))
+    except (OSError, subprocess.SubprocessError, ValueError, TypeError):
+        logger_.warning("Could not resolve YaScheduler RUNNING timestamps")
+    return result
 
 
 def running_source(node: ProcessNode) -> Optional[str]:
@@ -51,10 +107,17 @@ class RunningNotifications:
             self._intervals = {key: value for key, value in self._intervals.items()
                                if key in self._current}
 
-    def observe(self, node: ProcessNode, now: Optional[datetime] = None) -> None:
+    def observe(
+        self,
+        node: ProcessNode,
+        now: Optional[datetime] = None,
+        running_since: Optional[datetime] = None,
+    ) -> None:
         source = running_source(node)
         try:
             now = now or datetime.now(timezone.utc)
+            now = _aware(now)
+            running_since = _aware(running_since) if running_since is not None else None
             interval = (self._intervals.get(node.uuid) if self.no_commit else
                         node.base.extras.get(EXTRA_RUNNING, None))
             if source is None:
@@ -65,9 +128,15 @@ class RunningNotifications:
                 self._current.pop(node.uuid, None)
                 return
             if not interval or interval.get("source", "process") != source:
-                interval = {"since": now.isoformat(), "source": source}
+                since = running_since or now
+                interval = {"since": since.isoformat(), "source": source}
                 self._save(node, interval)
-            since = datetime.fromisoformat(interval["since"])
+            else:
+                since = _aware(datetime.fromisoformat(interval["since"]))
+                if running_since is not None and running_since != since:
+                    since = running_since
+                    interval = {"since": since.isoformat(), "source": source}
+                    self._save(node, interval)
             seconds = max(0, (now - since).total_seconds())
             message = self._describe(node, seconds, source)
             if self.hours is not None and seconds > self.hours * 3600:

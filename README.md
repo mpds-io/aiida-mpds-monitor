@@ -275,7 +275,7 @@ that type is listed in the hierarchy. Unlisted process types do not appear.
 Telegram reports ignore `monitor_filters` and MPDS delivery markers; normal
 MPDS webhook/archive filters remain unchanged.
 
-Each entry contains the node's PK, observed RUNNING duration, and its own
+Each entry contains the node's PK, RUNNING duration, and its own
 `label.strip()`. A node with an empty label remains in the report with
 `(label не задан)` as its name. For a scheduler job, the report shows both
 `Состояние AiiDA: waiting` and `Планировщик: RUNNING`, since AiiDA normally
@@ -313,16 +313,15 @@ active Telegram webhook and run only one consumer of its updates. Update offsets
 live in memory; a restart may repeat an unacknowledged command response.
 Long reports arrive as multiple messages without truncation.
 
-AiiDA's current process state does not supply a timestamp for entry into RUNNING.
-The monitor records its first RUNNING observation in the extra
-`monitor_running_interval`. The report therefore says **«не менее …»**, measured
-from that observation, rather than using the node's creation or modification time.
-For nodes already running when you enable this feature, the timer starts at the
-first scan. Normal restarts retain the timer; `--no-commit` keeps it in memory
-only. Observing any other state resets the interval. State changes between
-polls or while the monitor is stopped cannot be reconstructed; durations assume
-the RUNNING interval continued between observations. This measures AiiDA's
-RUNNING state, not scheduler wall time or CPU usage.
+AiiDA uses the scheduler's `dispatch_time` when the scheduler plugin provides it.
+For YaScheduler, the monitor reads the RUNNING transition time from the task's
+`updated_at` value returned by `yastatus --json`. This allows existing jobs to
+show their actual elapsed execution time immediately after a monitor restart.
+If the scheduler cannot provide a start timestamp, the monitor records its first
+RUNNING observation in the `monitor_running_interval` extra and reports a lower
+bound with **«не менее …»**. Normal restarts retain that fallback timer;
+`--no-commit` keeps it in memory only. Observing any other state resets the
+interval. This measures scheduler execution time when available, not CPU usage.
 
 `--dry-run` sends no Telegram requests and writes no tracking extras.
 The one-shot `aiida-mpds-submit` command does not send Telegram messages.

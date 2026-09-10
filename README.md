@@ -301,12 +301,14 @@ an unsolicited message, including when retained from an older configuration.
 
 The bot accepts requests only from the numeric chat ID configured through
 `TELEGRAM_CHAT_ID` or YAML. In a group, any member of that configured chat can
-request a report. The daemon uses
-[getUpdates](https://core.telegram.org/bots/api#getupdates) once per scan; allow
-the scan duration plus `poll_interval` for a response. Use a bot without an
-active Telegram webhook and run only one consumer of its updates. Update offsets
-live in memory; a restart may repeat an unacknowledged command response.
-Long reports arrive as multiple messages without truncation.
+request a report. A background thread uses Telegram
+[long polling](https://core.telegram.org/bots/api#getupdates), so commands are
+received independently of the AiiDA scan interval and normally answered within
+about a second. The response uses the latest completed AiiDA snapshot, which can
+be up to `poll_interval` seconds old. Use a bot without an active Telegram
+webhook and run only one consumer of its updates. Update offsets live in memory;
+a restart may repeat an unacknowledged command response. Long reports arrive as
+multiple messages without truncation.
 
 AiiDA uses the scheduler's `dispatch_time` when the scheduler plugin provides it.
 For YaScheduler, the monitor reads the RUNNING transition time from the task's

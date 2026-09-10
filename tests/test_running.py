@@ -1,3 +1,4 @@
+import threading
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -82,6 +83,8 @@ def test_no_commit_and_new_scan():
     tracker.notifier.notify.assert_not_called()
     assert node.base.extras.get(EXTRA_RUNNING) is None
     tracker.begin_scan()
+    assert "PK: 123" in tracker.report()
+    tracker.finish_scan()
     assert "нет расчётов" in tracker.report()
 
 
@@ -130,6 +133,34 @@ def test_commands_button_chat_authorization_and_offset():
     assert calls[0].args[0].endswith("/getUpdates")
 
 
+def test_background_command_polling_starts_and_stops():
+    notifier = TelegramNotifier("secret", "123")
+    started = threading.Event()
+
+    def poll(report, long_poll_timeout=0):
+        assert report() == "current report"
+        assert long_poll_timeout == 10
+        started.set()
+        notifier._stop_commands.wait(1)
+        return True
+
+    with patch.object(notifier, "poll_commands", side_effect=poll):
+        notifier.start_command_polling(lambda: "current report")
+        assert started.wait(1)
+        notifier.stop_command_polling()
+    assert notifier._command_thread is not None
+    assert not notifier._command_thread.is_alive()
+
+
+def test_command_long_poll_uses_matching_http_timeout():
+    notifier = TelegramNotifier("secret", "123")
+    with patch("aiida_mpds_monitor.notifications.requests.post") as post:
+        post.return_value.json.return_value = {"ok": True, "result": []}
+        assert notifier.poll_commands(lambda: "report", long_poll_timeout=10)
+    assert post.call_args.kwargs["json"]["timeout"] == 10
+    assert post.call_args.kwargs["timeout"] == 15
+
+
 @pytest.mark.parametrize("failure", ["network", "api", "malformed"])
 def test_command_failure_is_contained_and_redacted(failure, caplog):
     with patch("aiida_mpds_monitor.notifications.requests.post") as post:
@@ -157,10 +188,11 @@ def test_long_messages_are_split_without_losing_descriptions():
 def test_loop_serves_current_scan_report_and_continues_mpds():
     notifier = MagicMock()
     reports = []
-    notifier.poll_commands.side_effect = lambda report: reports.append(report())
+    notifier.start_command_polling.side_effect = lambda report: reports.append(report())
 
     def observe(config, logger, running):
         running.observe(make_node(), NOW)
+        running.finish_scan()
 
     with patch.object(daemon, "create_notifier", return_value=notifier), patch.object(
         daemon, "scan_notifications", side_effect=observe
@@ -170,6 +202,7 @@ def test_loop_serves_current_scan_report_and_continues_mpds():
     assert len(reports) == 1
     assert "PK: 123" in reports[0]
     assert "RUNNING: не менее 0 ч 0 мин" in reports[0]
+    notifier.stop_command_polling.assert_called_once()
 
 
 @pytest.mark.parametrize("state", ["finished", "excepted", "killed", "waiting", "created"])
@@ -181,7 +214,7 @@ def test_report_excludes_nonrunning_nodes(state):
 
 
 def test_monitor_without_commands_sends_no_telegram_messages():
-    notifier = TelegramNotifier("secret", "123")
+    notifier = MagicMock()
 
     def observe(config, logger, running):
         node = make_node()
@@ -191,15 +224,13 @@ def test_monitor_without_commands_sends_no_telegram_messages():
 
     with patch.object(daemon, "create_notifier", return_value=notifier), patch.object(
         daemon, "scan_notifications", side_effect=observe
-    ), patch.object(daemon, "scan_and_process", side_effect=KeyboardInterrupt), patch(
-        "aiida_mpds_monitor.notifications.requests.post"
-    ) as post:
-        post.return_value.json.return_value = {"ok": True, "result": []}
+    ), patch.object(daemon, "scan_and_process", side_effect=KeyboardInterrupt):
         daemon.run_monitor_loop(
             AttributeDict({**DEFAULT_CONFIG, "running_alert_hours": 1}), MagicMock()
         )
-    post.assert_called_once()
-    assert post.call_args.args[0].endswith("/getUpdates")
+    notifier.notify.assert_not_called()
+    notifier.start_command_polling.assert_called_once()
+    notifier.stop_command_polling.assert_called_once()
 
 
 def test_timer_storage_failure_does_not_hide_running_calculation():

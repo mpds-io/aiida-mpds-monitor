@@ -108,14 +108,23 @@ class RunningNotifications:
         self.no_commit = no_commit
         self._intervals: dict[str, dict] = {}
         self._current: dict[str, str] = {}
+        self._next_current: Optional[dict[str, str]] = None
 
     def begin_scan(self) -> None:
-        self._current.clear()
+        self._next_current = {}
 
     def finish_scan(self) -> None:
+        if self._next_current is None:
+            return
         if self.no_commit:
             self._intervals = {key: value for key, value in self._intervals.items()
-                               if key in self._current}
+                               if key in self._next_current}
+        self._current = self._next_current
+        self._next_current = None
+
+    def _record(self, uuid: str, message: str) -> None:
+        target = self._next_current if self._next_current is not None else self._current
+        target[uuid] = message
 
     def observe(
         self,
@@ -135,7 +144,8 @@ class RunningNotifications:
                     self._intervals.pop(node.uuid, None)
                 elif interval is not None:
                     node.base.extras.delete(EXTRA_RUNNING)
-                self._current.pop(node.uuid, None)
+                if self._next_current is None:
+                    self._current.pop(node.uuid, None)
                 return
             if not interval or interval.get("source", "process") != source:
                 since = running_since or now
@@ -151,14 +161,14 @@ class RunningNotifications:
             message = self._describe(node, seconds, source)
             if self.hours is not None and seconds > self.hours * 3600:
                 message += f"\n⏳ Превышен порог {self.hours:g} ч"
-            self._current[node.uuid] = message
+            self._record(node.uuid, message)
         except Exception:
             logger.warning("Could not track RUNNING interval for PK %s", getattr(node, "pk", None))
             if source is not None:
-                self._current[node.uuid] = (
+                self._record(node.uuid, (
                     f"Название: {(node.label or '').strip() or '(label не задан)'}\n"
                     f"PK: {node.pk}\nRUNNING ({source}): длительность недоступна"
-                )
+                ))
 
     def _save(self, node: ProcessNode, interval: dict) -> None:
         if self.no_commit:

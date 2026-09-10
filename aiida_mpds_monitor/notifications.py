@@ -2,6 +2,7 @@
 
 import logging
 import os
+import threading
 from abc import ABC, abstractmethod
 from typing import Callable, Mapping, Optional
 
@@ -17,8 +18,15 @@ class Notifier(ABC):
     def notify(self, message: str) -> None:
         """Attempt delivery of a message."""
 
-    def poll_commands(self, report: Callable[[], str]) -> None:
+    def start_command_polling(self, report: Callable[[], str]) -> None:
+        """Optionally start serving interactive commands."""
+
+    def stop_command_polling(self) -> None:
+        """Optionally stop serving interactive commands."""
+
+    def poll_commands(self, report: Callable[[], str], long_poll_timeout: int = 0) -> bool:
         """Optionally serve requests for a current-process report."""
+        return True
 
 
 class TelegramNotifier(Notifier):
@@ -26,6 +34,8 @@ class TelegramNotifier(Notifier):
         self._url = f"https://api.telegram.org/bot{token}/sendMessage"
         self._chat_id = chat_id
         self._offset = 0
+        self._command_thread: Optional[threading.Thread] = None
+        self._stop_commands = threading.Event()
 
     def notify(self, message: str) -> None:
         # Use a conservative chunk size, including for non-BMP Unicode characters.
@@ -52,19 +62,46 @@ class TelegramNotifier(Notifier):
             # Request exceptions can contain the URL (and therefore the bot token).
             logger.warning("Telegram notification failed (HTTP, network, or invalid response)")
 
-    def poll_commands(self, report: Callable[[], str]) -> None:
-        """Read commands once per monitor scan; never accept another chat's requests."""
+    def start_command_polling(self, report: Callable[[], str]) -> None:
+        """Serve commands independently of the slower AiiDA monitor loop."""
+        if self._command_thread is not None and self._command_thread.is_alive():
+            return
+        self._stop_commands.clear()
+        self._command_thread = threading.Thread(
+            target=self._command_loop,
+            args=(report,),
+            name="telegram-command-poller",
+            daemon=True,
+        )
+        self._command_thread.start()
+
+    def stop_command_polling(self) -> None:
+        self._stop_commands.set()
+        if self._command_thread is not None:
+            self._command_thread.join(timeout=2)
+
+    def _command_loop(self, report: Callable[[], str]) -> None:
+        while not self._stop_commands.is_set():
+            if not self.poll_commands(report, long_poll_timeout=10):
+                self._stop_commands.wait(1)
+
+    def poll_commands(self, report: Callable[[], str], long_poll_timeout: int = 0) -> bool:
+        """Read commands using Telegram long polling; reject requests from other chats."""
         try:
             response = requests.post(
                 self._url.replace("/sendMessage", "/getUpdates"),
-                json={"offset": self._offset, "timeout": 0, "allowed_updates": ["message"]},
-                timeout=10,
+                json={
+                    "offset": self._offset,
+                    "timeout": long_poll_timeout,
+                    "allowed_updates": ["message"],
+                },
+                timeout=long_poll_timeout + 5,
             )
             response.raise_for_status()
             data = response.json()
             if data.get("ok") is not True:
                 logger.warning("Telegram command polling rejected by API")
-                return
+                return False
             for update in data["result"]:
                 update_id = update["update_id"]
                 if update_id < self._offset:
@@ -79,8 +116,10 @@ class TelegramNotifier(Notifier):
                     self._send("Нажмите «Текущие расчёты» или отправьте /running.", keyboard=True)
                 elif command == "/running" or text == "Текущие расчёты":
                     self.notify(report())
+            return True
         except Exception:
             logger.warning("Telegram command polling failed; continuing monitoring")
+            return False
 
 
 def create_notifier(config: Optional[Mapping] = None) -> Optional[Notifier]:

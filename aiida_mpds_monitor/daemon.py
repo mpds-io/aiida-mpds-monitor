@@ -539,32 +539,39 @@ def run_monitor_loop(config, logger, dry_run=False, no_commit=False, force=False
     notifier = None if dry_run else create_notifier(config)
     running = (RunningNotifications(notifier, config.get("running_alert_hours"), no_commit)
                if notifier else None)
-    while True:
-        try:
-            if dry_run:
-                # In test mode, we emulate the behavior without sending
-                scan_and_process_dry_run(config, logger, force=force)
-            else:
-                if running is not None:
-                    try:
-                        running.begin_scan()
-                        scan_notifications(config, logger, running)
-                        notifier.poll_commands(running.report)
-                    except Exception:
-                        logger.warning("Notification scan failed; continuing MPDS monitoring")
-                scan_and_process(config, logger, no_commit=no_commit, force=force)
+    command_polling_started = False
+    try:
+        while True:
+            try:
+                if dry_run:
+                    # In test mode, we emulate the behavior without sending
+                    scan_and_process_dry_run(config, logger, force=force)
+                else:
+                    if running is not None:
+                        try:
+                            running.begin_scan()
+                            scan_notifications(config, logger, running)
+                            if not command_polling_started:
+                                notifier.start_command_polling(running.report)
+                                command_polling_started = True
+                        except Exception:
+                            logger.warning("Notification scan failed; continuing MPDS monitoring")
+                    scan_and_process(config, logger, no_commit=no_commit, force=force)
 
-            if force:
-                force = False
-                logger.info(
-                    "Forced resend scan completed; continuing in normal monitor mode"
-                )
-        except KeyboardInterrupt:
-            logger.info("Shutting down gracefully...")
-            break
-        except Exception as e:
-            logger.exception(f"Unexpected error: {e}")
-        time.sleep(config.poll_interval)
+                if force:
+                    force = False
+                    logger.info(
+                        "Forced resend scan completed; continuing in normal monitor mode"
+                    )
+            except KeyboardInterrupt:
+                logger.info("Shutting down gracefully...")
+                break
+            except Exception as e:
+                logger.exception(f"Unexpected error: {e}")
+            time.sleep(config.poll_interval)
+    finally:
+        if notifier is not None:
+            notifier.stop_command_polling()
 
 
 def main():

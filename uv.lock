@@ -89,7 +89,7 @@ dependencies = [
 
 [[package]]
 name = "aiida-mpds-monitor"
-version = "0.10.4"
+version = "0.10.5"
 source = { editable = "." }
 dependencies = [
     { name = "aiida-core" },

@@ -13,6 +13,19 @@ logger = logging.getLogger(__name__)
 EXTRA_RUNNING = "monitor_running_interval"
 
 
+def running_source(node: ProcessNode) -> Optional[str]:
+    """Recognize engine execution and active jobs executing in the scheduler."""
+    state = getattr(node.process_state, "value", node.process_state)
+    if state not in ("created", "waiting", "running"):
+        return None
+    get_scheduler_state = getattr(node, "get_scheduler_state", None)
+    scheduler = get_scheduler_state() if callable(get_scheduler_state) else None
+    scheduler = getattr(scheduler, "value", scheduler)
+    if isinstance(scheduler, str) and scheduler.lower() == "running":
+        return "scheduler"
+    return "process" if state == "running" else None
+
+
 class RunningNotifications:
     def __init__(self, notifier: Notifier, hours: Optional[float] = None,
                  no_commit: bool = False) -> None:
@@ -39,33 +52,33 @@ class RunningNotifications:
                                if key in self._current}
 
     def observe(self, node: ProcessNode, now: Optional[datetime] = None) -> None:
-        state = getattr(node.process_state, "value", node.process_state)
+        source = running_source(node)
         try:
             now = now or datetime.now(timezone.utc)
             interval = (self._intervals.get(node.uuid) if self.no_commit else
                         node.base.extras.get(EXTRA_RUNNING, None))
-            if state != "running":
+            if source is None:
                 if self.no_commit:
                     self._intervals.pop(node.uuid, None)
                 elif interval is not None:
                     node.base.extras.delete(EXTRA_RUNNING)
                 self._current.pop(node.uuid, None)
                 return
-            if not interval:
-                interval = {"since": now.isoformat(), "alerted": False}
+            if not interval or interval.get("source", "process") != source:
+                interval = {"since": now.isoformat(), "source": source}
                 self._save(node, interval)
             since = datetime.fromisoformat(interval["since"])
             seconds = max(0, (now - since).total_seconds())
-            message = self._describe(node, seconds)
+            message = self._describe(node, seconds, source)
             if self.hours is not None and seconds > self.hours * 3600:
                 message += f"\n⏳ Превышен порог {self.hours:g} ч"
             self._current[node.uuid] = message
         except Exception:
             logger.warning("Could not track RUNNING interval for PK %s", getattr(node, "pk", None))
-            if state == "running":
+            if source is not None:
                 self._current[node.uuid] = (
                     f"Название: {(node.label or '').strip() or '(label не задан)'}\n"
-                    f"PK: {node.pk}\nRUNNING: длительность недоступна"
+                    f"PK: {node.pk}\nRUNNING ({source}): длительность недоступна"
                 )
 
     def _save(self, node: ProcessNode, interval: dict) -> None:
@@ -75,13 +88,16 @@ class RunningNotifications:
             node.base.extras.set(EXTRA_RUNNING, interval)
 
     @staticmethod
-    def _describe(node: ProcessNode, seconds: float) -> str:
+    def _describe(node: ProcessNode, seconds: float, source: str = "process") -> str:
         minutes = int(seconds // 60)
         lines = [f"Название: {(node.label or '').strip() or '(label не задан)'}", f"PK: {node.pk}"]
+        if source == "scheduler":
+            state = getattr(node.process_state, "value", node.process_state)
+            lines.extend([f"Состояние AiiDA: {state}", "Планировщик: RUNNING"])
         lines.append(f"RUNNING: не менее {minutes // 60} ч {minutes % 60} мин")
         return "\n".join(lines)
 
     def report(self) -> str:
         if not self._current:
-            return "В workchain_hierarchy текущего профиля AiiDA нет расчётов со статусом RUNNING."
+            return "В workchain_hierarchy текущего профиля AiiDA нет расчётов в RUNNING (AiiDA или планировщик)."
         return "Текущие расчёты AiiDA\n\n" + "\n\n".join(self._current.values())

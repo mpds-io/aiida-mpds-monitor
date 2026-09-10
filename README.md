@@ -266,24 +266,30 @@ long-running notifications.
 
 Reports select process types listed anywhere in `workchain_hierarchy`: parent
 keys, child keys, and calculation labels in the lists. The daemon queries
-`ProcessNode` directly for these types with native `process_state = running`;
-call-link depth and the existence/state of parent nodes do not restrict the
-report. For example, a RUNNING `CrystalParallelCalculation` appears whenever
+`ProcessNode` directly for these types. It includes processes whose native
+`process_state` is `running`, plus active CalcJobs whose AiiDA process state is
+`created`, `waiting`, or `running` and whose scheduler state is `running`.
+Call-link depth and the existence or state of parent nodes do not restrict the
+report. For example, a running `CrystalParallelCalculation` appears whenever
 that type is listed in the hierarchy. Unlisted process types do not appear.
 Telegram reports ignore `monitor_filters` and MPDS delivery markers; normal
 MPDS webhook/archive filters remain unchanged.
 
 Each entry contains the node's PK, observed RUNNING duration, and its own
 `label.strip()`. A node with an empty label remains in the report with
-`(label не задан)` as its name. Processes in `waiting` or other states are not
-included, even if an associated scheduler job is active. The daemon must use
-the same AiiDA profile as the calculations you want to inspect.
+`(label не задан)` as its name. For a scheduler job, the report shows both
+`Состояние AiiDA: waiting` and `Планировщик: RUNNING`, since AiiDA normally
+keeps a submitted CalcJob in `waiting` while the cluster executes it. Queued
+jobs are excluded. The daemon must use the same AiiDA profile as the
+calculations you want to inspect.
 
 For example:
 
 ```text
 Название: BaMnO3/185: Geometry optimization
 PK: 123456
+Состояние AiiDA: waiting
+Планировщик: RUNNING
 RUNNING: не менее 25 ч 17 мин
 ⏳ Превышен порог 24 ч
 ```

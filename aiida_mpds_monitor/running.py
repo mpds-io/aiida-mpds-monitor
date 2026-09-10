@@ -3,8 +3,11 @@
 import json
 import logging
 import math
+import shutil
 import subprocess
+import sys
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Iterable, Optional
 
 from aiida.orm import ProcessNode
@@ -18,6 +21,14 @@ EXTRA_RUNNING = "monitor_running_interval"
 def _aware(value: datetime) -> datetime:
     """Return an aware datetime; AiiDA timestamps are UTC when timezone is absent."""
     return value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+
+
+def _yastatus_executable() -> str:
+    """Find yastatus in the application virtual environment or service PATH."""
+    sibling = Path(sys.executable).with_name("yastatus")
+    if sibling.is_file():
+        return str(sibling)
+    return shutil.which("yastatus") or "yastatus"
 
 
 def resolve_running_since(
@@ -48,14 +59,17 @@ def resolve_running_since(
 
     try:
         completed = subprocess.run(
-            ["yastatus", "--jobs", *yascheduler_nodes, "--json"],
+            [_yastatus_executable(), "--jobs", *yascheduler_nodes, "--json"],
             capture_output=True,
             check=False,
             text=True,
             timeout=15,
         )
         if completed.returncode != 0:
-            logger_.warning("YaScheduler timestamp query failed")
+            logger_.warning(
+                "YaScheduler timestamp query failed with exit code %s",
+                completed.returncode,
+            )
             return result
         for task in json.loads(completed.stdout):
             if task.get("status") != "RUNNING":
@@ -64,21 +78,17 @@ def resolve_running_since(
             updated_at = task.get("updated_at")
             if node is not None and updated_at:
                 result[node.uuid] = _aware(datetime.fromisoformat(updated_at))
-    except (OSError, subprocess.SubprocessError, ValueError, TypeError):
-        logger_.warning("Could not resolve YaScheduler RUNNING timestamps")
+    except (OSError, subprocess.SubprocessError, ValueError, TypeError) as exc:
+        logger_.warning(
+            "Could not resolve YaScheduler RUNNING timestamps (%s)",
+            type(exc).__name__,
+        )
     return result
 
 
 def running_source(node: ProcessNode) -> Optional[str]:
-    """Recognize engine execution and active jobs executing in the scheduler."""
+    """Recognize only the native AiiDA RUNNING process state."""
     state = getattr(node.process_state, "value", node.process_state)
-    if state not in ("created", "waiting", "running"):
-        return None
-    get_scheduler_state = getattr(node, "get_scheduler_state", None)
-    scheduler = get_scheduler_state() if callable(get_scheduler_state) else None
-    scheduler = getattr(scheduler, "value", scheduler)
-    if isinstance(scheduler, str) and scheduler.lower() == "running":
-        return "scheduler"
     return "process" if state == "running" else None
 
 
@@ -160,13 +170,10 @@ class RunningNotifications:
     def _describe(node: ProcessNode, seconds: float, source: str = "process") -> str:
         minutes = int(seconds // 60)
         lines = [f"Название: {(node.label or '').strip() or '(label не задан)'}", f"PK: {node.pk}"]
-        if source == "scheduler":
-            state = getattr(node.process_state, "value", node.process_state)
-            lines.extend([f"Состояние AiiDA: {state}", "Планировщик: RUNNING"])
         lines.append(f"RUNNING: не менее {minutes // 60} ч {minutes % 60} мин")
         return "\n".join(lines)
 
     def report(self) -> str:
         if not self._current:
-            return "В workchain_hierarchy текущего профиля AiiDA нет расчётов в RUNNING (AiiDA или планировщик)."
+            return "В workchain_hierarchy текущего профиля AiiDA нет расчётов со статусом RUNNING."
         return "Текущие расчёты AiiDA\n\n" + "\n\n".join(self._current.values())

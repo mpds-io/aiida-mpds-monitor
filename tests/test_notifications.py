@@ -175,10 +175,6 @@ def test_report_scan_queries_types_from_all_hierarchy_levels_directly():
         {"attributes.process_label": {"in": ["Child", "CrystalParallelCalculation", "Parent"]}},
         {"or": [
             {"attributes.process_state": "running"},
-            {"and": [
-                {"attributes.process_state": {"in": ["created", "waiting", "running"]}},
-                {"attributes.scheduler_state": {"in": ["running", "RUNNING"]}},
-            ]},
             {"extras": {"has_key": EXTRA_RUNNING}},
         ]},
     ]})

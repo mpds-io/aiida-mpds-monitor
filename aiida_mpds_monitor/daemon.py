@@ -518,10 +518,6 @@ def scan_notifications(config, logger, running: RunningNotifications) -> None:
         {"attributes.process_label": {"in": sorted(labels)}},
         {"or": [
             {"attributes.process_state": "running"},
-            {"and": [
-                {"attributes.process_state": {"in": ["created", "waiting", "running"]}},
-                {"attributes.scheduler_state": {"in": ["running", "RUNNING"]}},
-            ]},
             # Revisit tracked nodes to reset intervals when they leave RUNNING.
             {"extras": {"has_key": EXTRA_RUNNING}},
         ]},

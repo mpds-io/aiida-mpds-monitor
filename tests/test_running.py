@@ -12,6 +12,7 @@ from aiida_mpds_monitor.notifications import TelegramNotifier
 from aiida_mpds_monitor.running import (
     EXTRA_RUNNING,
     RunningNotifications,
+    _yastatus_executable,
     resolve_running_since,
 )
 from tests.test_notifications import make_node
@@ -212,16 +213,12 @@ def test_timer_storage_failure_does_not_hide_running_calculation():
 
 
 @pytest.mark.parametrize("scheduler", ["running", "RUNNING"])
-def test_waiting_calc_with_running_scheduler_is_reported(scheduler):
+def test_waiting_calc_with_running_scheduler_is_excluded(scheduler):
     node = make_node("waiting")
     node.get_scheduler_state = lambda: scheduler
     tracker = RunningNotifications(MagicMock())
     tracker.observe(node, NOW)
-    tracker.observe(node, NOW + timedelta(hours=2))
-    assert "PK: 123" in tracker.report()
-    assert "Состояние AiiDA: waiting" in tracker.report()
-    assert "Планировщик: RUNNING" in tracker.report()
-    assert "2 ч 0 мин" in tracker.report()
+    assert "нет расчётов" in tracker.report()
     tracker.notifier.notify.assert_not_called()
 
 
@@ -237,21 +234,18 @@ def test_queued_and_terminal_jobs_with_stale_scheduler_state_are_excluded(state,
     assert "нет расчётов" in tracker.report()
 
 
-def test_timer_resets_when_execution_source_changes():
+def test_timer_resets_when_aiida_process_leaves_running():
     node = make_node()
     tracker = RunningNotifications(MagicMock())
     tracker.observe(node, NOW)
     node.process_state.value = "waiting"
     node.get_scheduler_state = lambda: "running"
     tracker.observe(node, NOW + timedelta(hours=5))
-    assert "0 ч 0 мин" in tracker.report()
-    node.get_scheduler_state = lambda: "queued"
-    tracker.observe(node, NOW + timedelta(hours=6))
     assert "нет расчётов" in tracker.report()
 
 
 def test_authoritative_running_since_replaces_first_observation():
-    node = make_node("waiting")
+    node = make_node("running")
     node.get_scheduler_state = lambda: "running"
     tracker = RunningNotifications(MagicMock())
     tracker.observe(node, NOW)
@@ -277,12 +271,14 @@ def test_resolve_running_since_uses_yascheduler_updated_at():
         '[{"task_id": 10050, "status": "RUNNING", '
         '"updated_at": "2026-09-06T11:32:47+02:00"}]'
     )
-    with patch("aiida_mpds_monitor.running.subprocess.run") as run:
+    with patch(
+        "aiida_mpds_monitor.running._yastatus_executable", return_value="/venv/bin/yastatus"
+    ), patch("aiida_mpds_monitor.running.subprocess.run") as run:
         run.return_value = SimpleNamespace(returncode=0, stdout=output)
         result = resolve_running_since([node])
     assert result[node.uuid] == datetime.fromisoformat("2026-09-06T11:32:47+02:00")
     run.assert_called_once_with(
-        ["yastatus", "--jobs", "10050", "--json"],
+        ["/venv/bin/yastatus", "--jobs", "10050", "--json"],
         capture_output=True,
         check=False,
         text=True,
@@ -304,3 +300,10 @@ def test_yascheduler_timestamp_failure_falls_back_cleanly(failure):
         else:
             run.side_effect = __import__("subprocess").TimeoutExpired("yastatus", 15)
         assert resolve_running_since([node]) == {}
+
+
+def test_yastatus_is_resolved_next_to_virtualenv_python():
+    with patch("aiida_mpds_monitor.running.sys.executable", "/opt/aiida/bin/python"), patch(
+        "aiida_mpds_monitor.running.Path.is_file", return_value=True
+    ):
+        assert _yastatus_executable() == "/opt/aiida/bin/yastatus"

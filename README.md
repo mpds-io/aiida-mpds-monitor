@@ -260,7 +260,7 @@ workchain_hierarchy:
 ### Reports by command or button
 
 The bot sends calculation information **only in response to a request**.
-Send `/start` to display the **Текущие расчёты** button, then press it or send
+Send `/start` to display the **Running calculations** button, then press it or send
 `/running`. The daemon does not send automatic completion, failure, or
 long-running notifications.
 
@@ -281,7 +281,7 @@ Each entry contains the node's PK, RUNNING duration, and its own
 `label.strip()`. For YaScheduler jobs, it also includes the assigned
 `node.hostname` from `yastatus --json` when that field is available. A node
 with an empty label remains in the report with
-`(label не задан)` as its name. It does not expose the internal AiiDA `waiting`
+`(label not set)` as its name. It does not expose the internal AiiDA `waiting`
 state for an executing scheduler job. Queued and terminal calculations are
 excluded. The daemon must use the same AiiDA profile as the calculations you
 want to inspect.
@@ -289,11 +289,13 @@ want to inspect.
 For example:
 
 ```text
-Название: BaMnO3/185: Geometry optimization
+🚨 LONG-RUNNING CALCULATION 🚨
+Configured limit exceeded: 24 h
+
+Name: BaMnO3/185: Geometry optimization
 PK: 123456
 Hostname: compute-17
-RUNNING: не менее 25 ч 17 мин
-⏳ Превышен порог 24 ч
+Running time: at least 25 h 17 min
 ```
 
 To mark long-running processes within a requested report, configure:
@@ -305,6 +307,8 @@ running_alert_hours: 24
 Restart the daemon after changing this setting. Positive fractional hours, such
 as `0.5`, are supported; `null` disables the marker. This setting never triggers
 an unsolicited message, including when retained from an older configuration.
+Calculations over the configured limit receive a warning header and appear
+before the other calculations in the requested report.
 
 The bot accepts requests only from the numeric chat ID configured through
 `TELEGRAM_CHAT_ID` or YAML. In a group, any member of that configured chat can
@@ -323,7 +327,7 @@ For YaScheduler, the monitor reads the RUNNING transition time from the task's
 show their actual elapsed execution time immediately after a monitor restart.
 If the scheduler cannot provide a start timestamp, the monitor records its first
 RUNNING observation in the `monitor_running_interval` extra and reports a lower
-bound with **«не менее …»**. Normal restarts retain that fallback timer;
+bound with **at least …**. Normal restarts retain that fallback timer;
 `--no-commit` keeps it in memory only. Observing any other state resets the
 interval. This measures scheduler execution time when available, not CPU usage.
 

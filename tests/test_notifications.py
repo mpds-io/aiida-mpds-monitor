@@ -184,7 +184,7 @@ def test_report_scan_queries_types_from_all_hierarchy_levels_directly():
     ]})
     assert "PK: 123" in running.report()
     assert "PK: 124" not in running.report()
-    assert "label не задан" in running.report()
+    assert "label not set" in running.report()
     assert finished.base.extras.get(EXTRA_RUNNING) is None
     running.notifier.notify.assert_not_called()
 

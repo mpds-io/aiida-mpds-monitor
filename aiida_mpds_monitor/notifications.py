@@ -47,7 +47,7 @@ class TelegramNotifier(Notifier):
             payload = {"chat_id": self._chat_id, "text": message}
             if keyboard:
                 payload["reply_markup"] = {
-                    "keyboard": [[{"text": "Текущие расчёты"}]],
+                    "keyboard": [[{"text": "Running calculations"}]],
                     "resize_keyboard": True,
                 }
             response = requests.post(
@@ -113,8 +113,11 @@ class TelegramNotifier(Notifier):
                 text = message.get("text", "").strip()
                 command = text.split("@", 1)[0]
                 if command in ("/start", "/help"):
-                    self._send("Нажмите «Текущие расчёты» или отправьте /running.", keyboard=True)
-                elif command == "/running" or text == "Текущие расчёты":
+                    self._send(
+                        'Press "Running calculations" or send /running.',
+                        keyboard=True,
+                    )
+                elif command == "/running" or text == "Running calculations":
                     self.notify(report())
             return True
         except Exception:

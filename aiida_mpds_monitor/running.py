@@ -144,8 +144,8 @@ class RunningNotifications:
                 logger.warning("running_alert_hours must be positive; RUNNING threshold disabled")
         self.no_commit = no_commit
         self._intervals: dict[str, dict] = {}
-        self._current: dict[str, str] = {}
-        self._next_current: Optional[dict[str, str]] = None
+        self._current: dict[str, tuple[bool, str]] = {}
+        self._next_current: Optional[dict[str, tuple[bool, str]]] = None
 
     def begin_scan(self) -> None:
         self._next_current = {}
@@ -159,9 +159,9 @@ class RunningNotifications:
         self._current = self._next_current
         self._next_current = None
 
-    def _record(self, uuid: str, message: str) -> None:
+    def _record(self, uuid: str, message: str, overdue: bool = False) -> None:
         target = self._next_current if self._next_current is not None else self._current
-        target[uuid] = message
+        target[uuid] = (overdue, message)
 
     def observe(
         self,
@@ -197,19 +197,24 @@ class RunningNotifications:
                     self._save(node, interval)
             seconds = max(0, (now - since).total_seconds())
             message = self._describe(node, seconds, source, hostname)
-            if self.hours is not None and seconds > self.hours * 3600:
-                message += f"\n⏳ Превышен порог {self.hours:g} ч"
-            self._record(node.uuid, message)
+            overdue = self.hours is not None and seconds > self.hours * 3600
+            if overdue:
+                message = (
+                    "🚨 LONG-RUNNING CALCULATION 🚨\n"
+                    f"Configured limit exceeded: {self.hours:g} h\n\n"
+                    f"{message}"
+                )
+            self._record(node.uuid, message, overdue)
         except Exception:
             logger.warning("Could not track RUNNING interval for PK %s", getattr(node, "pk", None))
             if source is not None:
                 lines = [
-                    f"Название: {(node.label or '').strip() or '(label не задан)'}",
+                    f"Name: {(node.label or '').strip() or '(label not set)'}",
                     f"PK: {node.pk}",
                 ]
                 if hostname:
                     lines.append(f"Hostname: {hostname}")
-                lines.append("RUNNING: длительность недоступна")
+                lines.append("Running time: unavailable")
                 self._record(node.uuid, "\n".join(lines))
 
     def _save(self, node: ProcessNode, interval: dict) -> None:
@@ -226,13 +231,22 @@ class RunningNotifications:
         hostname: Optional[str] = None,
     ) -> str:
         minutes = int(seconds // 60)
-        lines = [f"Название: {(node.label or '').strip() or '(label не задан)'}", f"PK: {node.pk}"]
+        lines = [
+            f"Name: {(node.label or '').strip() or '(label not set)'}",
+            f"PK: {node.pk}",
+        ]
         if hostname:
             lines.append(f"Hostname: {hostname}")
-        lines.append(f"RUNNING: не менее {minutes // 60} ч {minutes % 60} мин")
+        lines.append(f"Running time: at least {minutes // 60} h {minutes % 60} min")
         return "\n".join(lines)
 
     def report(self) -> str:
         if not self._current:
-            return "В workchain_hierarchy текущего профиля AiiDA нет расчётов со статусом RUNNING."
-        return "Текущие расчёты AiiDA\n\n" + "\n\n".join(self._current.values())
+            return (
+                "No RUNNING calculations were found in workchain_hierarchy "
+                "for the current AiiDA profile."
+            )
+        entries = sorted(self._current.values(), key=lambda entry: not entry[0])
+        return "Current AiiDA calculations\n\n" + "\n\n".join(
+            message for _, message in entries
+        )

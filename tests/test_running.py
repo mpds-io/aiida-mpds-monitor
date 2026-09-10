@@ -36,11 +36,11 @@ def test_running_report_uses_exact_webhook_payload_and_observed_time():
     report = tracker.report()
     assert "BaMnO3/185" in report
     assert "Geometry optimization" in report
-    assert "Название: BaMnO3/185: Geometry optimization\n" in report
+    assert "Name: BaMnO3/185: Geometry optimization\n" in report
     assert "Relax atomic positions and cell" not in report
     assert "PK 124" not in report
-    assert "Процесс:" not in report
-    assert "2 ч 17 мин" in report
+    assert "Process:" not in report
+    assert "2 h 17 min" in report
     # Creation time and modification time are intentionally not used.
     assert node.base.extras.get(EXTRA_RUNNING)["since"] == NOW.isoformat()
 
@@ -56,7 +56,8 @@ def test_threshold_only_marks_requested_report_across_polls_and_restart():
     tracker.observe(node, NOW + timedelta(hours=4))
     RunningNotifications(notifier, hours=2).observe(node, NOW + timedelta(hours=5))
     notifier.notify.assert_not_called()
-    assert "Превышен порог 2 ч" in tracker.report()
+    assert "🚨 LONG-RUNNING CALCULATION 🚨" in tracker.report()
+    assert "Configured limit exceeded: 2 h" in tracker.report()
 
 
 def test_nonrunning_resets_interval():
@@ -68,7 +69,7 @@ def test_nonrunning_resets_interval():
     node.process_state.value = "waiting"
     tracker.observe(node, NOW + timedelta(hours=3))
     assert node.base.extras.get(EXTRA_RUNNING) is None
-    assert "нет расчётов" in tracker.report()
+    assert "No RUNNING calculations" in tracker.report()
     node.process_state.value = "running"
     tracker.observe(node, NOW + timedelta(hours=4))
     tracker.observe(node, NOW + timedelta(hours=6))
@@ -86,7 +87,7 @@ def test_no_commit_and_new_scan():
     tracker.begin_scan()
     assert "PK: 123" in tracker.report()
     tracker.finish_scan()
-    assert "нет расчётов" in tracker.report()
+    assert "No RUNNING calculations" in tracker.report()
 
 
 @pytest.mark.parametrize("hours", [None, 0, -1, "bad", float("nan"), float("inf"), True])
@@ -96,7 +97,7 @@ def test_disabled_or_invalid_threshold(hours):
     tracker.observe(node, NOW)
     tracker.observe(node, NOW + timedelta(days=10))
     tracker.notifier.notify.assert_not_called()
-    assert "240 ч" in tracker.report()
+    assert "240 h" in tracker.report()
 
 
 def test_observation_never_calls_delivery():
@@ -120,15 +121,18 @@ def test_commands_button_chat_authorization_and_offset():
     with patch("aiida_mpds_monitor.notifications.requests.post") as post:
         post.return_value.json.return_value = {"ok": True, "result": [
             update(1, "/running", chat=999), update(2, "/start"),
-            update(3, "/running"), update(4, "Текущие расчёты"),
+            update(3, "/running"), update(4, "Running calculations"),
         ]}
         notifier.poll_commands(report)
         notifier.poll_commands(report)
     assert report.call_count == 2
     calls = post.call_args_list
     assert calls[1].kwargs["json"]["reply_markup"]["keyboard"] == [
-        [{"text": "Текущие расчёты"}]
+        [{"text": "Running calculations"}]
     ]
+    assert calls[1].kwargs["json"]["text"] == (
+        'Press "Running calculations" or send /running.'
+    )
     assert calls[-1].kwargs["json"]["offset"] == 5
     assert calls[0].kwargs["json"]["timeout"] == 0
     assert calls[0].args[0].endswith("/getUpdates")
@@ -177,7 +181,7 @@ def test_command_failure_is_contained_and_redacted(failure, caplog):
 
 
 def test_long_messages_are_split_without_losing_descriptions():
-    message = "Расчёт 🔬\n" * 1000
+    message = "Calculation 🔬\n" * 1000
     with patch("aiida_mpds_monitor.notifications.requests.post") as post:
         post.return_value.json.return_value = {"ok": True}
         TelegramNotifier("secret", "123").notify(message)
@@ -202,7 +206,7 @@ def test_loop_serves_current_scan_report_and_continues_mpds():
     mpds.assert_called_once()
     assert len(reports) == 1
     assert "PK: 123" in reports[0]
-    assert "RUNNING: не менее 0 ч 0 мин" in reports[0]
+    assert "Running time: at least 0 h 0 min" in reports[0]
     notifier.stop_command_polling.assert_called_once()
 
 
@@ -210,7 +214,7 @@ def test_loop_serves_current_scan_report_and_continues_mpds():
 def test_report_excludes_nonrunning_nodes(state):
     tracker = RunningNotifications(MagicMock())
     tracker.observe(make_node(state, 0), NOW)
-    assert "нет расчётов" in tracker.report()
+    assert "No RUNNING calculations" in tracker.report()
     tracker.notifier.notify.assert_not_called()
 
 
@@ -240,8 +244,8 @@ def test_timer_storage_failure_does_not_hide_running_calculation():
     tracker = RunningNotifications(MagicMock())
     tracker.observe(node, NOW)
     assert "PK: 123" in tracker.report()
-    assert "RUNNING: длительность недоступна" in tracker.report()
-    assert "нет расчётов" not in tracker.report()
+    assert "Running time: unavailable" in tracker.report()
+    assert "No RUNNING calculations" not in tracker.report()
 
 
 @pytest.mark.parametrize("scheduler", ["running", "RUNNING"])
@@ -252,7 +256,7 @@ def test_running_scheduler_job_is_reported_as_running(scheduler):
     tracker.observe(node, NOW)
     tracker.observe(node, NOW + timedelta(hours=2))
     assert "PK: 123" in tracker.report()
-    assert "RUNNING: не менее 2 ч 0 мин" in tracker.report()
+    assert "Running time: at least 2 h 0 min" in tracker.report()
     assert "waiting" not in tracker.report().lower()
     tracker.notifier.notify.assert_not_called()
 
@@ -266,7 +270,7 @@ def test_queued_and_terminal_jobs_with_stale_scheduler_state_are_excluded(state,
     node.get_scheduler_state = lambda: scheduler
     tracker = RunningNotifications(MagicMock())
     tracker.observe(node, NOW)
-    assert "нет расчётов" in tracker.report()
+    assert "No RUNNING calculations" in tracker.report()
 
 
 def test_timer_resets_when_execution_source_changes():
@@ -276,10 +280,10 @@ def test_timer_resets_when_execution_source_changes():
     node.process_state.value = "waiting"
     node.get_scheduler_state = lambda: "running"
     tracker.observe(node, NOW + timedelta(hours=5))
-    assert "RUNNING: не менее 0 ч 0 мин" in tracker.report()
+    assert "Running time: at least 0 h 0 min" in tracker.report()
     node.get_scheduler_state = lambda: "queued"
     tracker.observe(node, NOW + timedelta(hours=6))
-    assert "нет расчётов" in tracker.report()
+    assert "No RUNNING calculations" in tracker.report()
 
 
 def test_authoritative_running_since_replaces_first_observation():
@@ -289,7 +293,7 @@ def test_authoritative_running_since_replaces_first_observation():
     tracker.observe(node, NOW)
     actual_start = NOW - timedelta(hours=5, minutes=12)
     tracker.observe(node, NOW, running_since=actual_start)
-    assert "5 ч 12 мин" in tracker.report()
+    assert "5 h 12 min" in tracker.report()
     assert node.base.extras.get(EXTRA_RUNNING)["since"] == actual_start.isoformat()
 
 
@@ -298,7 +302,18 @@ def test_running_report_includes_scheduler_hostname_when_available():
     node.get_scheduler_state = lambda: "running"
     tracker = RunningNotifications(MagicMock())
     tracker.observe(node, NOW, hostname="compute-17")
-    assert "PK: 123\nHostname: compute-17\nRUNNING:" in tracker.report()
+    assert "PK: 123\nHostname: compute-17\nRunning time:" in tracker.report()
+
+
+def test_overdue_calculations_are_highlighted_and_listed_first():
+    normal = make_node(pk=1)
+    overdue = make_node(pk=2)
+    tracker = RunningNotifications(MagicMock(), hours=2)
+    tracker.observe(normal, NOW, running_since=NOW - timedelta(hours=1))
+    tracker.observe(overdue, NOW, running_since=NOW - timedelta(hours=3))
+    report = tracker.report()
+    assert report.index("🚨 LONG-RUNNING CALCULATION 🚨") < report.index("PK: 1")
+    assert report.index("PK: 2") < report.index("PK: 1")
 
 
 def test_resolve_running_since_uses_generic_dispatch_time():

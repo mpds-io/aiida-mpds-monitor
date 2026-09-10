@@ -87,8 +87,15 @@ def resolve_running_since(
 
 
 def running_source(node: ProcessNode) -> Optional[str]:
-    """Recognize only the native AiiDA RUNNING process state."""
+    """Recognize an executing AiiDA process or scheduler calculation."""
     state = getattr(node.process_state, "value", node.process_state)
+    if state not in ("created", "waiting", "running"):
+        return None
+    get_scheduler_state = getattr(node, "get_scheduler_state", None)
+    scheduler = get_scheduler_state() if callable(get_scheduler_state) else None
+    scheduler = getattr(scheduler, "value", scheduler)
+    if isinstance(scheduler, str) and scheduler.lower() == "running":
+        return "scheduler"
     return "process" if state == "running" else None
 
 
@@ -167,7 +174,7 @@ class RunningNotifications:
             if source is not None:
                 self._record(node.uuid, (
                     f"Название: {(node.label or '').strip() or '(label не задан)'}\n"
-                    f"PK: {node.pk}\nRUNNING ({source}): длительность недоступна"
+                    f"PK: {node.pk}\nRUNNING: длительность недоступна"
                 ))
 
     def _save(self, node: ProcessNode, interval: dict) -> None:

@@ -266,8 +266,11 @@ long-running notifications.
 
 Reports select process types listed anywhere in `workchain_hierarchy`: parent
 keys, child keys, and calculation labels in the lists. The daemon queries
-`ProcessNode` directly for these types. It includes only processes whose native
-AiiDA `process_state` is `running`.
+`ProcessNode` directly for these types. It includes processes whose native AiiDA
+`process_state` is `running`, and calculations whose scheduler state is
+`running` while their AiiDA process remains active (`created`, `waiting`, or
+`running`). AiiDA normally uses `waiting` while a CalcJob executes remotely;
+the Telegram report presents this as the effective calculation state RUNNING.
 Call-link depth and the existence or state of parent nodes do not restrict the
 report. For example, a running `CrystalParallelCalculation` appears whenever
 that type is listed in the hierarchy. Unlisted process types do not appear.
@@ -276,9 +279,10 @@ MPDS webhook/archive filters remain unchanged.
 
 Each entry contains the node's PK, RUNNING duration, and its own
 `label.strip()`. A node with an empty label remains in the report with
-`(label не задан)` as its name. Nodes in AiiDA `waiting`, `created`, or terminal
-states are excluded, regardless of their scheduler state. The daemon must use
-the same AiiDA profile as the calculations you want to inspect.
+`(label не задан)` as its name. It does not expose the internal AiiDA `waiting`
+state for an executing scheduler job. Queued and terminal calculations are
+excluded. The daemon must use the same AiiDA profile as the calculations you
+want to inspect.
 
 For example:
 

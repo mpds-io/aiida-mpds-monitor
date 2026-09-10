@@ -239,17 +239,20 @@ def test_timer_storage_failure_does_not_hide_running_calculation():
     tracker = RunningNotifications(MagicMock())
     tracker.observe(node, NOW)
     assert "PK: 123" in tracker.report()
-    assert "RUNNING (process): длительность недоступна" in tracker.report()
+    assert "RUNNING: длительность недоступна" in tracker.report()
     assert "нет расчётов" not in tracker.report()
 
 
 @pytest.mark.parametrize("scheduler", ["running", "RUNNING"])
-def test_waiting_calc_with_running_scheduler_is_excluded(scheduler):
+def test_running_scheduler_job_is_reported_as_running(scheduler):
     node = make_node("waiting")
     node.get_scheduler_state = lambda: scheduler
     tracker = RunningNotifications(MagicMock())
     tracker.observe(node, NOW)
-    assert "нет расчётов" in tracker.report()
+    tracker.observe(node, NOW + timedelta(hours=2))
+    assert "PK: 123" in tracker.report()
+    assert "RUNNING: не менее 2 ч 0 мин" in tracker.report()
+    assert "waiting" not in tracker.report().lower()
     tracker.notifier.notify.assert_not_called()
 
 
@@ -265,13 +268,16 @@ def test_queued_and_terminal_jobs_with_stale_scheduler_state_are_excluded(state,
     assert "нет расчётов" in tracker.report()
 
 
-def test_timer_resets_when_aiida_process_leaves_running():
+def test_timer_resets_when_execution_source_changes():
     node = make_node()
     tracker = RunningNotifications(MagicMock())
     tracker.observe(node, NOW)
     node.process_state.value = "waiting"
     node.get_scheduler_state = lambda: "running"
     tracker.observe(node, NOW + timedelta(hours=5))
+    assert "RUNNING: не менее 0 ч 0 мин" in tracker.report()
+    node.get_scheduler_state = lambda: "queued"
+    tracker.observe(node, NOW + timedelta(hours=6))
     assert "нет расчётов" in tracker.report()
 
 

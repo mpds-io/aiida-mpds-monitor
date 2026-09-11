@@ -160,12 +160,13 @@ def generate_archive(
     uuid: str,
     archive_path: Optional[Path] = None,
     tmp_root: Optional[Path] = None,
+    save_input_json: bool = False,
 ) -> Optional[Path]:
     """
     Generate a 7z archive for the AiiDA calculation with given UUID.
 
     Creates a temporary folder with the calculation's retrieved files and
-    an ``INPUT.json`` (if parameters exist), then compresses it using
+    an ``INPUT.json`` (if requested and parameters exist), then compresses it using
     :func:`dft_organizer.core.archive_and_save`.
     """
     try:
@@ -205,7 +206,7 @@ def generate_archive(
     # Write INPUT.json if parameters are present
     try:
         params = None
-        if hasattr(calc.inputs, "parameters"):
+        if save_input_json and hasattr(calc.inputs, "parameters"):
             try:
                 params = calc.inputs.parameters.get_dict()
             except Exception:
@@ -251,6 +252,7 @@ def generate_parent_archive(
     archive_path: Optional[Path] = None,
     tmp_root: Optional[Path] = None,
     require_all_subnodes: bool = True,
+    save_input_json: bool = False,
 ) -> Optional[Path]:
     """
     Generate a 7z archive for the parent WorkChain with subdirectories for each
@@ -345,7 +347,7 @@ def generate_parent_archive(
 
             try:
                 params = None
-                if hasattr(calculation.inputs, "parameters"):
+                if save_input_json and hasattr(calculation.inputs, "parameters"):
                     try:
                         params = calculation.inputs.parameters.get_dict()
                     except Exception:

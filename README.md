@@ -209,13 +209,23 @@ export MPDS_MONITOR_KEY="your-api-key"
 aiida-mpds-submit 12345
 ```
 
-## Telegram notifications
+## Telegram reports in a shared chat
+
+The bot sends reports containing **only RUNNING calculations that exceed
+`running_alert_hours`** to one shared Telegram group. Each entry identifies the
+calculation owner by their configured Telegram name.
+
+Reports are checked after the first successful scan at daemon startup and once
+a day at the configured time. If no calculations are over the limit, the bot
+sends nothing. Commands and buttons, including `/running`, no longer request
+reports.
 
 1. Open [@BotFather](https://t.me/BotFather) in Telegram, send `/newbot`, and
    follow the prompts. Save the token it returns. See Telegram's
    [bot setup guide](https://core.telegram.org/bots/tutorial).
-2. Open your new bot's chat and send `/start`. For a group, add the bot and
-   send a command addressed to it, such as `/start@YourBotUsername`.
+2. Add the bot to your shared group and allow it to send messages. Send a command
+   addressed to it, such as `/start@YourBotUsername`, to make the group visible
+   in the next step. This command is only for discovering the group ID.
 3. Call the HTTPS Bot API method `getUpdates` using your token and read
    `result[].message.chat.id` from the reply. Group IDs may be negative.
    See [getUpdates](https://core.telegram.org/bots/api#getupdates).
@@ -223,7 +233,7 @@ aiida-mpds-submit 12345
 
 ```bash
 export TELEGRAM_BOT_TOKEN="<token-from-BotFather>"
-export TELEGRAM_CHAT_ID="<chat-id>"
+export TELEGRAM_CHAT_ID="<shared-group-chat-id>"
 aiida-mpds-monitor --logging-level INFO
 ```
 
@@ -232,9 +242,31 @@ Alternatively, add the settings to `~/.aiida/aiida_mpds_monitor/conf.yaml`
 
 ```yaml
 telegram_bot_token: "<token-from-BotFather>"
-telegram_chat_id: "<chat-id>"
+telegram_chat_id: "<shared-group-chat-id>"
 running_alert_hours: 24
+notification_time: "09:00"       # Daily report time, HH:MM (24-hour clock)
+notification_timezone: "UTC"    # IANA timezone, e.g. Europe/Berlin
+notification_user_names:
+  "alice@example.org": "@alice"
+  "bob@example.org": "Bob Smith (@bob)"
 ```
+
+All users use the same bot token and group chat ID. Separate monitor instances
+for separate AiiDA profiles may share these credentials: the monitor only sends
+messages and does not consume Telegram updates. Run one monitor per AiiDA
+profile to avoid duplicate reports for the same calculations.
+
+### Identifying calculation owners
+
+Keys in `notification_user_names` are the email addresses of the calculations'
+AiiDA owners (`node.user.email`). Values are the names to display in the shared
+chat; use `@username` for a Telegram username. Use `verdi user list` in the
+monitored profile to find the owner email addresses.
+
+If an owner is not mapped, the report uses their AiiDA first and last name,
+falling back to their AiiDA email address. When several people submit under the
+same AiiDA account, the monitor sees one owner; the mapping cannot distinguish
+those people without separate ownership information.
 
 The uppercase YAML keys `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` are also
 accepted. For each setting, a nonempty environment value takes priority, followed
@@ -248,7 +280,7 @@ more verbose). The existing YAML controls polling and which processes to watch:
 
 ```yaml
 poll_interval: 30
-running_alert_hours: 24  # null (default) disables the long-running report marker
+running_alert_hours: 24  # null (default) disables Telegram calculation reports
 monitor_filters:
   max_age_hours: 168
 workchain_hierarchy:
@@ -257,12 +289,37 @@ workchain_hierarchy:
       - CrystalParallelCalculation
 ```
 
-### Reports by command or button
+### Startup and daily schedule
 
-The bot sends calculation information **only in response to a request**.
-Send `/start` to display the **Running calculations** button, then press it or send
-`/running`. The daemon does not send automatic completion, failure, or
-long-running notifications.
+`notification_time` defaults to `"09:00"` and `notification_timezone` to `"UTC"`.
+Quote the time in YAML. Reports use the first successful calculation scan at or
+after the scheduled local time, so the polling interval and time spent processing
+webhooks or archives can delay delivery. Failed scans do not send partial or
+stale reports; a later successful scan can deliver the due report.
+
+The startup check happens after the first successful scan. A startup before the
+scheduled time allows another report at that day's scheduled time. A startup
+at or after the scheduled time counts as that day's daily check, avoiding two
+immediate reports. Restarting the daemon intentionally performs another startup
+check.
+
+Each daily check runs once per local calendar date, even when daylight saving
+time repeats an hour. If the scheduled time is skipped by a clock change, the
+first successful scan afterward performs the check. An empty check also consumes
+the day's slot: calculations crossing the limit later wait until the next report.
+
+`running_alert_hours` must be positive; fractional values such as `0.5` are
+supported. Only durations **strictly greater** than the limit qualify. A missing
+or invalid limit disables reports and logs a warning. Invalid time or timezone
+settings also disable reports with a warning. Restart the daemon after changing
+these settings.
+
+Daily checks are remembered in memory. A failed Telegram delivery is logged and
+is not retried in every polling cycle, because a timeout may occur after Telegram
+has already accepted the message. The next scheduled check or startup can report
+calculations that are still overdue. Long reports are split into multiple messages.
+
+### Included calculations
 
 Reports select process types listed anywhere in `workchain_hierarchy`: parent
 keys, child keys, and calculation labels in the lists. The daemon queries
@@ -273,11 +330,12 @@ keys, child keys, and calculation labels in the lists. The daemon queries
 the Telegram report presents this as the effective calculation state RUNNING.
 Call-link depth and the existence or state of parent nodes do not restrict the
 report. For example, a running `CrystalParallelCalculation` appears whenever
-that type is listed in the hierarchy. Unlisted process types do not appear.
+that type is listed in the hierarchy and its running time exceeds the limit.
+Unlisted process types do not appear.
 Telegram reports ignore `monitor_filters` and MPDS delivery markers; normal
 MPDS webhook/archive filters remain unchanged.
 
-Each entry contains the node's PK, RUNNING duration, and its own
+Each entry contains the owner's name, the node's PK, RUNNING duration, and its own
 `label.strip()`. For YaScheduler jobs, it also includes the assigned
 `node.hostname` from `yastatus --json` when that field is available. A node
 with an empty label remains in the report with
@@ -292,34 +350,12 @@ For example:
 🚨 LONG-RUNNING CALCULATION 🚨
 Configured limit exceeded: 24 h
 
+User: @alice
 Name: BaMnO3/185: Geometry optimization
 PK: 123456
 Hostname: compute-17
 Running time: at least 25 h 17 min
 ```
-
-To mark long-running processes within a requested report, configure:
-
-```yaml
-running_alert_hours: 24
-```
-
-Restart the daemon after changing this setting. Positive fractional hours, such
-as `0.5`, are supported; `null` disables the marker. This setting never triggers
-an unsolicited message, including when retained from an older configuration.
-Calculations over the configured limit receive a warning header and appear
-before the other calculations in the requested report.
-
-The bot accepts requests only from the numeric chat ID configured through
-`TELEGRAM_CHAT_ID` or YAML. In a group, any member of that configured chat can
-request a report. A background thread uses Telegram
-[long polling](https://core.telegram.org/bots/api#getupdates), so commands are
-received independently of the AiiDA scan interval and normally answered within
-about a second. The response uses the latest completed AiiDA snapshot, which can
-be up to `poll_interval` seconds old. Use a bot without an active Telegram
-webhook and run only one consumer of its updates. Update offsets live in memory;
-a restart may repeat an unacknowledged command response. Long reports arrive as
-multiple messages without truncation.
 
 AiiDA uses the scheduler's `dispatch_time` when the scheduler plugin provides it.
 For YaScheduler, the monitor reads the RUNNING transition time from the task's
@@ -330,12 +366,14 @@ RUNNING observation in the `monitor_running_interval` extra and reports a lower
 bound with **at least …**. Normal restarts retain that fallback timer;
 `--no-commit` keeps it in memory only. Observing any other state resets the
 interval. This measures scheduler execution time when available, not CPU usage.
+Calculations with an unavailable duration are omitted from scheduled reports
+because they cannot be confirmed over the limit.
 
 `--dry-run` sends no Telegram requests and writes no tracking extras.
 The one-shot `aiida-mpds-submit` command does not send Telegram messages.
 Network/API failures are logged without stopping MPDS monitoring; requests use
 an HTTP timeout of 10 seconds. Existing webhook and archive processing continues
-independently of bot requests.
+normally.
 
 ## Testing with Stub Server
 

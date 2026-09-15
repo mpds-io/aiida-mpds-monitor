@@ -17,6 +17,7 @@ class Notifier(ABC):
     def notify(self, message: str) -> None:
         """Attempt delivery of a message."""
 
+
 class TelegramNotifier(Notifier):
     def __init__(self, token: str, chat_id: str) -> None:
         self._url = f"https://api.telegram.org/bot{token}/sendMessage"
@@ -41,6 +42,7 @@ class TelegramNotifier(Notifier):
         except (requests.RequestException, ValueError, AttributeError):
             # Request exceptions can contain the URL (and therefore the bot token).
             logger.warning("Telegram notification failed (HTTP, network, or invalid response)")
+
 
 def create_notifier(config: Optional[Mapping] = None) -> Optional[Notifier]:
     """Resolve Telegram settings from the environment, then YAML configuration."""

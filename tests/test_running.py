@@ -1,4 +1,3 @@
-import threading
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -45,7 +44,7 @@ def test_running_report_uses_exact_webhook_payload_and_observed_time():
     assert node.base.extras.get(EXTRA_RUNNING)["since"] == NOW.isoformat()
 
 
-def test_threshold_only_marks_requested_report_across_polls_and_restart():
+def test_threshold_is_observed_without_sending_between_scheduled_reports():
     node = make_node()
     notifier = MagicMock()
     tracker = RunningNotifications(notifier, hours=2)
@@ -98,6 +97,7 @@ def test_disabled_or_invalid_threshold(hours):
     tracker.observe(node, NOW + timedelta(days=10))
     tracker.notifier.notify.assert_not_called()
     assert "240 h" in tracker.report()
+    assert tracker.overdue_report() is None
 
 
 def test_observation_never_calls_delivery():
@@ -111,75 +111,6 @@ def test_observation_never_calls_delivery():
     notifier.notify.assert_not_called()
 
 
-def update(identifier, text, chat=123):
-    return {"update_id": identifier, "message": {"chat": {"id": chat}, "text": text}}
-
-
-def test_commands_button_chat_authorization_and_offset():
-    notifier = TelegramNotifier("secret", "123")
-    report = MagicMock(return_value="current report")
-    with patch("aiida_mpds_monitor.notifications.requests.post") as post:
-        post.return_value.json.return_value = {"ok": True, "result": [
-            update(1, "/running", chat=999), update(2, "/start"),
-            update(3, "/running"), update(4, "Running calculations"),
-        ]}
-        notifier.poll_commands(report)
-        notifier.poll_commands(report)
-    assert report.call_count == 2
-    calls = post.call_args_list
-    assert calls[1].kwargs["json"]["reply_markup"]["keyboard"] == [
-        [{"text": "Running calculations"}]
-    ]
-    assert calls[1].kwargs["json"]["text"] == (
-        'Press "Running calculations" or send /running.'
-    )
-    assert calls[-1].kwargs["json"]["offset"] == 5
-    assert calls[0].kwargs["json"]["timeout"] == 0
-    assert calls[0].args[0].endswith("/getUpdates")
-
-
-def test_background_command_polling_starts_and_stops():
-    notifier = TelegramNotifier("secret", "123")
-    started = threading.Event()
-
-    def poll(report, long_poll_timeout=0):
-        assert report() == "current report"
-        assert long_poll_timeout == 10
-        started.set()
-        notifier._stop_commands.wait(1)
-        return True
-
-    with patch.object(notifier, "poll_commands", side_effect=poll):
-        notifier.start_command_polling(lambda: "current report")
-        assert started.wait(1)
-        notifier.stop_command_polling()
-    assert notifier._command_thread is not None
-    assert not notifier._command_thread.is_alive()
-
-
-def test_command_long_poll_uses_matching_http_timeout():
-    notifier = TelegramNotifier("secret", "123")
-    with patch("aiida_mpds_monitor.notifications.requests.post") as post:
-        post.return_value.json.return_value = {"ok": True, "result": []}
-        assert notifier.poll_commands(lambda: "report", long_poll_timeout=10)
-    assert post.call_args.kwargs["json"]["timeout"] == 10
-    assert post.call_args.kwargs["timeout"] == 15
-
-
-@pytest.mark.parametrize("failure", ["network", "api", "malformed"])
-def test_command_failure_is_contained_and_redacted(failure, caplog):
-    with patch("aiida_mpds_monitor.notifications.requests.post") as post:
-        if failure == "network":
-            post.side_effect = requests.Timeout("secret")
-        else:
-            post.return_value.json.return_value = (
-                {"ok": False, "description": "secret"} if failure == "api" else None
-            )
-        TelegramNotifier("secret", "123").poll_commands(lambda: "report")
-    assert "Telegram command polling" in caplog.text
-    assert "secret" not in caplog.text
-
-
 def test_long_messages_are_split_without_losing_descriptions():
     message = "Calculation 🔬\n" * 1000
     with patch("aiida_mpds_monitor.notifications.requests.post") as post:
@@ -190,24 +121,67 @@ def test_long_messages_are_split_without_losing_descriptions():
     assert all(len(part.encode("utf-16-le")) // 2 <= 4096 for part in parts)
 
 
-def test_loop_serves_current_scan_report_and_continues_mpds():
-    notifier = MagicMock()
-    reports = []
-    notifier.start_command_polling.side_effect = lambda report: reports.append(report())
+@pytest.mark.parametrize("failure", [None, "network", "api"])
+def test_loop_sends_only_overdue_calculations_to_shared_chat_and_continues_mpds(failure):
+    notifier = TelegramNotifier("secret", "-123")
+    config = AttributeDict({
+        **DEFAULT_CONFIG,
+        "running_alert_hours": 2,
+        "notification_user_names": {"alice@example.org": "@alice"},
+    })
 
     def observe(config, logger, running):
-        running.observe(make_node(), NOW)
+        overdue = make_node(pk=123)
+        overdue.user = SimpleNamespace(email="alice@example.org")
+        running.observe(overdue, NOW, running_since=NOW - timedelta(hours=3))
+        running.observe(make_node(pk=456), NOW, running_since=NOW - timedelta(hours=1))
+        running.observe(make_node("finished", 0, pk=789), NOW)
         running.finish_scan()
 
     with patch.object(daemon, "create_notifier", return_value=notifier), patch.object(
         daemon, "scan_notifications", side_effect=observe
-    ), patch.object(daemon, "scan_and_process", side_effect=KeyboardInterrupt) as mpds:
-        daemon.run_monitor_loop(AttributeDict(DEFAULT_CONFIG), MagicMock())
+    ), patch.object(daemon, "scan_and_process", side_effect=KeyboardInterrupt) as mpds, patch(
+        "aiida_mpds_monitor.notifications.requests.post"
+    ) as post:
+        if failure == "network":
+            post.side_effect = requests.Timeout("secret")
+        else:
+            post.return_value.json.return_value = {"ok": failure is None}
+        daemon.run_monitor_loop(config, MagicMock())
     mpds.assert_called_once()
-    assert len(reports) == 1
-    assert "PK: 123" in reports[0]
-    assert "Running time: at least 0 h 0 min" in reports[0]
-    notifier.stop_command_polling.assert_called_once()
+    post.assert_called_once()
+    assert post.call_args.args[0].endswith("/sendMessage")
+    payload = post.call_args.kwargs["json"]
+    assert payload["chat_id"] == "-123"
+    assert "User: @alice" in payload["text"]
+    assert "PK: 123" in payload["text"]
+    assert "PK: 456" not in payload["text"]
+    assert "PK: 789" not in payload["text"]
+    assert "Running time: at least 3 h 0 min" in payload["text"]
+
+
+def test_loop_waits_for_a_successful_scan_before_startup_notification():
+    notifier = MagicMock()
+    attempts = 0
+
+    def observe(config, logger, running):
+        nonlocal attempts
+        attempts += 1
+        running.observe(make_node(), NOW, running_since=NOW - timedelta(hours=3))
+        if attempts == 1:
+            raise RuntimeError("scan failed")
+        running.finish_scan()
+
+    with patch.object(daemon, "create_notifier", return_value=notifier), patch.object(
+        daemon, "scan_notifications", side_effect=observe
+    ), patch.object(daemon, "scan_and_process", side_effect=[None, KeyboardInterrupt]), patch.object(
+        daemon.time, "sleep"
+    ):
+        daemon.run_monitor_loop(
+            AttributeDict({**DEFAULT_CONFIG, "running_alert_hours": 2}), MagicMock()
+        )
+    assert attempts == 2
+    notifier.notify.assert_called_once()
 
 
 @pytest.mark.parametrize("state", ["finished", "excepted", "killed", "waiting", "created"])
@@ -218,24 +192,24 @@ def test_report_excludes_nonrunning_nodes(state):
     tracker.notifier.notify.assert_not_called()
 
 
-def test_monitor_without_commands_sends_no_telegram_messages():
+@pytest.mark.parametrize("hours", [None, 2])
+def test_monitor_without_overdue_calculations_sends_no_telegram_messages(hours):
     notifier = MagicMock()
 
     def observe(config, logger, running):
         node = make_node()
         running.observe(node, NOW)
-        running.observe(node, NOW + timedelta(hours=100))
+        running.observe(node, NOW + timedelta(hours=1))
         running.observe(make_node("finished", 0, pk=2), NOW)
+        running.finish_scan()
 
     with patch.object(daemon, "create_notifier", return_value=notifier), patch.object(
         daemon, "scan_notifications", side_effect=observe
     ), patch.object(daemon, "scan_and_process", side_effect=KeyboardInterrupt):
         daemon.run_monitor_loop(
-            AttributeDict({**DEFAULT_CONFIG, "running_alert_hours": 1}), MagicMock()
+            AttributeDict({**DEFAULT_CONFIG, "running_alert_hours": hours}), MagicMock()
         )
     notifier.notify.assert_not_called()
-    notifier.start_command_polling.assert_called_once()
-    notifier.stop_command_polling.assert_called_once()
 
 
 def test_timer_storage_failure_does_not_hide_running_calculation():
@@ -246,6 +220,7 @@ def test_timer_storage_failure_does_not_hide_running_calculation():
     assert "PK: 123" in tracker.report()
     assert "Running time: unavailable" in tracker.report()
     assert "No RUNNING calculations" not in tracker.report()
+    assert tracker.overdue_report() is None
 
 
 @pytest.mark.parametrize("scheduler", ["running", "RUNNING"])
@@ -314,6 +289,48 @@ def test_overdue_calculations_are_highlighted_and_listed_first():
     report = tracker.report()
     assert report.index("🚨 LONG-RUNNING CALCULATION 🚨") < report.index("PK: 1")
     assert report.index("PK: 2") < report.index("PK: 1")
+
+
+def test_overdue_report_excludes_boundary_and_resolves_each_owner_separately():
+    tracker = RunningNotifications(MagicMock(), hours=0.5, user_names={
+        "alice@example.org": "@alice", "bob@example.org": "Bob Smith (@bob)",
+    })
+    alice = make_node(pk=1)
+    alice.user = SimpleNamespace(email="alice@example.org")
+    bob = make_node(pk=2)
+    bob.user = SimpleNamespace(email="bob@example.org")
+    boundary = make_node(pk=3)
+    tracker.observe(alice, NOW, running_since=NOW - timedelta(hours=1), hostname="worker-1")
+    tracker.observe(bob, NOW, running_since=NOW - timedelta(hours=2), hostname="worker-2")
+    tracker.observe(boundary, NOW, running_since=NOW - timedelta(minutes=30))
+    report = tracker.overdue_report()
+    assert "User: @alice\nName: Si\nPK: 1\nHostname: worker-1" in report
+    assert "User: Bob Smith (@bob)\nName: Si\nPK: 2\nHostname: worker-2" in report
+    assert "Configured limit exceeded: 0.5 h" in report
+    assert "PK: 3" not in report
+
+
+@pytest.mark.parametrize("first,last,expected", [
+    ("Alice", "Smith", "Alice Smith"), ("", "", "alice@example.org"),
+])
+def test_unmapped_owner_falls_back_to_aiida_identity(first, last, expected):
+    node = make_node()
+    node.user = SimpleNamespace(email="alice@example.org", first_name=first, last_name=last)
+    tracker = RunningNotifications(MagicMock(), hours=1)
+    tracker.observe(node, NOW, running_since=NOW - timedelta(hours=2))
+    assert f"User: {expected}\n" in tracker.overdue_report()
+
+
+def test_overdue_report_drops_finished_calculations_after_scan():
+    node = make_node()
+    tracker = RunningNotifications(MagicMock(), hours=1)
+    tracker.observe(node, NOW, running_since=NOW - timedelta(hours=2))
+    assert tracker.overdue_report() is not None
+    tracker.begin_scan()
+    node.process_state.value = "finished"
+    tracker.observe(node, NOW)
+    tracker.finish_scan()
+    assert tracker.overdue_report() is None
 
 
 def test_resolve_running_since_uses_generic_dispatch_time():

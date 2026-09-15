@@ -122,12 +122,19 @@ def test_long_messages_are_split_without_losing_descriptions():
 
 
 @pytest.mark.parametrize("failure", [None, "network", "api"])
-def test_loop_sends_only_overdue_calculations_to_shared_chat_and_continues_mpds(failure):
+@pytest.mark.parametrize("owner_config", [
+    {"notification_user_names": {"alice@example.org": "@alice"}},
+    {"notification_user_name": "alice"},
+    {"notification_user_name": "@alice"},
+])
+def test_loop_sends_only_overdue_calculations_to_shared_chat_and_continues_mpds(
+    failure, owner_config
+):
     notifier = TelegramNotifier("secret", "-123")
     config = AttributeDict({
         **DEFAULT_CONFIG,
         "running_alert_hours": 2,
-        "notification_user_names": {"alice@example.org": "@alice"},
+        **owner_config,
     })
 
     def observe(config, logger, running):
@@ -319,6 +326,31 @@ def test_unmapped_owner_falls_back_to_aiida_identity(first, last, expected):
     tracker = RunningNotifications(MagicMock(), hours=1)
     tracker.observe(node, NOW, running_since=NOW - timedelta(hours=2))
     assert f"User: {expected}\n" in tracker.overdue_report()
+
+
+def test_owner_mapping_takes_priority_over_default_username():
+    alice = make_node(pk=1)
+    alice.user = SimpleNamespace(email="alice@example.org")
+    bob = make_node(pk=2)
+    bob.user = SimpleNamespace(email="bob@example.org")
+    tracker = RunningNotifications(
+        MagicMock(), hours=1, user_names={"alice@example.org": "Alice (@alice)"},
+        user_name=" bob ",
+    )
+    for node in (alice, bob):
+        tracker.observe(node, NOW, running_since=NOW - timedelta(hours=2))
+    report = tracker.overdue_report()
+    assert "User: Alice (@alice)\nName: Si\nPK: 1" in report
+    assert "User: @bob\nName: Si\nPK: 2" in report
+
+
+@pytest.mark.parametrize("user_name", [None, "", "   ", 123, {}])
+def test_empty_or_invalid_default_name_keeps_aiida_owner_fallback(user_name):
+    node = make_node()
+    node.user = SimpleNamespace(email="alice@example.org")
+    tracker = RunningNotifications(MagicMock(), hours=1, user_name=user_name)
+    tracker.observe(node, NOW, running_since=NOW - timedelta(hours=2))
+    assert "User: alice@example.org\n" in tracker.overdue_report()
 
 
 def test_overdue_report_drops_finished_calculations_after_scan():

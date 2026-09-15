@@ -550,6 +550,7 @@ def run_monitor_loop(config, logger, dry_run=False, no_commit=False, force=False
     running = (RunningNotifications(
         notifier, config.get("running_alert_hours"), no_commit,
         user_names=config.get("notification_user_names"),
+        user_name=config.get("notification_user_name"),
     ) if notifier else None)
     reports = (DailyReports(
         notifier, config.get("notification_time", "09:00"),

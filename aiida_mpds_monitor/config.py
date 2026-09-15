@@ -17,6 +17,7 @@ DEFAULT_CONFIG = {
     "telegram_chat_id": "",
     "notification_time": "09:00",
     "notification_timezone": "UTC",
+    "notification_user_name": "",
     "notification_user_names": {},
     "workchain_hierarchy": {
         "MPDSStructureWorkChain": {

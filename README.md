@@ -263,8 +263,23 @@ AiiDA owners (`node.user.email`). Values are the names to display in the shared
 chat; use `@username` for a Telegram username. Use `verdi user list` in the
 monitored profile to find the owner email addresses.
 
-If an owner is not mapped, the report uses their AiiDA first and last name,
-falling back to their AiiDA email address. When several people submit under the
+For a monitor whose calculations belong to one person, you can set a default
+Telegram username instead:
+
+```yaml
+notification_user_name: "@alice"
+```
+
+The singular `notification_user_name` setting also accepts a bare username such
+as `"alice"` and adds `@` automatically. It applies to **every unmapped owner**
+in this monitor. Entries in the plural `notification_user_names` mapping take
+priority; keep using that mapping for profiles with multiple owners. Mapped
+values are used verbatim, so include `@` when specifying a Telegram username.
+Use the actual Telegram username, not just a profile display name. Restart the
+daemon after changing the configuration.
+
+If neither a mapping nor a default name is set, the report uses the owner's AiiDA
+first and last name, falling back to their email address. When several people submit under the
 same AiiDA account, the monitor sees one owner; the mapping cannot distinguish
 those people without separate ownership information.
 

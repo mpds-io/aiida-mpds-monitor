@@ -3,6 +3,7 @@
 import json
 import logging
 import math
+import re
 import shutil
 import subprocess
 import sys
@@ -132,9 +133,14 @@ def running_source(node: ProcessNode) -> Optional[str]:
 class RunningNotifications:
     def __init__(self, notifier: Notifier, hours: Optional[float] = None,
                  no_commit: bool = False,
-                 user_names: Optional[Mapping[str, str]] = None) -> None:
+                 user_names: Optional[Mapping[str, str]] = None,
+                 user_name: Optional[str] = None) -> None:
         self.notifier = notifier
         self.user_names = user_names if isinstance(user_names, Mapping) else {}
+        self.user_name = user_name.strip() if isinstance(user_name, str) else ""
+        # The singular setting is a default Telegram username for this monitor.
+        if re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{0,31}", self.user_name):
+            self.user_name = f"@{self.user_name}"
         self.hours = None
         if hours is not None:
             try:
@@ -226,12 +232,14 @@ class RunningNotifications:
             node.base.extras.set(EXTRA_RUNNING, interval)
 
     def _user_name(self, node: ProcessNode) -> str:
-        """Use the configured Telegram name or fall back to the AiiDA owner."""
+        """Use the owner's mapping, the default name, or the AiiDA owner identity."""
         user = getattr(node, "user", None)
         email = getattr(user, "email", "") or ""
         configured = self.user_names.get(email, "")
         if isinstance(configured, str) and configured.strip():
             return configured.strip()
+        if self.user_name:
+            return self.user_name
         name = " ".join(
             part.strip() for part in (getattr(user, "first_name", ""),
                                       getattr(user, "last_name", ""))

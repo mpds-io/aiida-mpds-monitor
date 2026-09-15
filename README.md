@@ -372,6 +372,25 @@ Hostname: compute-17
 Running time: at least 25 h 17 min
 ```
 
+After the calculation details, the bot sends a separate final message with
+statistics from the same completed scan:
+
+```text
+📊 Calculation statistics (this monitor)
+User: @alice
+RUNNING: 12
+Running longer than 24 h: 3
+```
+
+The totals cover all RUNNING processes selected by this monitor's
+`workchain_hierarchy`, including those within the time limit. Processes with
+unknown duration count toward RUNNING but cannot count as over the limit.
+Queued and terminal processes are excluded. Counts are local to this monitor;
+they are not combined across machines sharing the chat. The `User` line appears
+when `notification_user_name` is configured. Statistics follow the existing
+startup/daily schedule and are sent only when the report contains overdue
+calculations; a check with none remains silent.
+
 AiiDA uses the scheduler's `dispatch_time` when the scheduler plugin provides it.
 For YaScheduler, the monitor reads the RUNNING transition time from the task's
 `updated_at` value returned by `yastatus --json`. This allows existing jobs to

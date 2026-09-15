@@ -568,7 +568,9 @@ def run_monitor_loop(config, logger, dry_run=False, no_commit=False, force=False
                     try:
                         running.begin_scan()
                         scan_notifications(config, logger, running)
-                        reports.notify_if_due(running.overdue_report())
+                        reports.notify_if_due(
+                            running.overdue_report(), summary=running.statistics_report()
+                        )
                     except Exception:
                         logger.warning("Notification scan failed; continuing MPDS monitoring")
                 scan_and_process(config, logger, no_commit=no_commit, force=force)

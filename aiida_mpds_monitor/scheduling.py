@@ -39,7 +39,10 @@ class DailyReports:
                 "notification_timezone must be a valid IANA timezone"
             )
 
-    def notify_if_due(self, report: Optional[str], now: Optional[datetime] = None) -> None:
+    def notify_if_due(
+        self, report: Optional[str], now: Optional[datetime] = None,
+        summary: Optional[str] = None,
+    ) -> None:
         if self._time is None:
             return
         now = now or datetime.now(timezone.utc)
@@ -58,5 +61,7 @@ class DailyReports:
         if report:
             try:
                 self.notifier.notify(report)
+                if summary:
+                    self.notifier.notify(summary)
             except Exception:
                 logger.warning("Scheduled notification failed; continuing monitoring")

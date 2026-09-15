@@ -280,3 +280,17 @@ class RunningNotifications:
         """Return only calculations confirmed over the limit; otherwise stay silent."""
         entries = [message for overdue, message in self._current.values() if overdue]
         return "\n\n".join(entries) if entries else None
+
+    def statistics_report(self) -> str:
+        """Summarize running processes from the same completed scan as the report."""
+        entries = list(self._current.values())
+        overdue_count = sum(overdue for overdue, _ in entries)
+        lines = ["📊 Calculation statistics (this monitor)"]
+        if self.user_name:
+            lines.append(f"User: {self.user_name}")
+        lines.append(f"RUNNING: {len(entries)}")
+        if self.hours is not None:
+            lines.append(f"Running longer than {self.hours:g} h: {overdue_count}")
+        else:
+            lines.append("Running time limit: disabled")
+        return "\n".join(lines)

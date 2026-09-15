@@ -22,6 +22,37 @@ def test_startup_and_daily_delivery_once_per_date():
     ]
 
 
+def test_statistics_are_sent_last_only_when_a_report_is_due():
+    notifier = MagicMock()
+    reports = DailyReports(notifier)
+    reports.notify_if_due("startup report", NOW, summary="startup statistics")
+    reports.notify_if_due("not due", NOW + timedelta(minutes=30), summary="not due statistics")
+    reports.notify_if_due("daily report", NOW + timedelta(hours=1), summary="daily statistics")
+    reports.notify_if_due("duplicate", NOW + timedelta(hours=2), summary="duplicate statistics")
+    assert [call.args[0] for call in notifier.notify.call_args_list] == [
+        "startup report", "startup statistics", "daily report", "daily statistics",
+    ]
+
+
+def test_empty_report_does_not_send_statistics_alone():
+    notifier = MagicMock()
+    reports = DailyReports(notifier)
+    reports.notify_if_due(None, NOW, summary="RUNNING: 0")
+    reports.notify_if_due(None, NOW + timedelta(hours=1), summary="RUNNING: 5; overdue: 0")
+    notifier.notify.assert_not_called()
+
+
+def test_statistics_delivery_failure_does_not_crash_or_repeat(caplog):
+    notifier = MagicMock()
+    notifier.notify.side_effect = [None, RuntimeError("secret")]
+    reports = DailyReports(notifier)
+    reports.notify_if_due("report", NOW + timedelta(hours=1), summary="statistics")
+    reports.notify_if_due("duplicate", NOW + timedelta(hours=2), summary="duplicate statistics")
+    assert notifier.notify.call_count == 2
+    assert "Scheduled notification failed" in caplog.text
+    assert "secret" not in caplog.text
+
+
 @pytest.mark.parametrize("hours", [1, 5])
 def test_startup_at_or_after_daily_time_consumes_todays_slot(hours):
     notifier = MagicMock()

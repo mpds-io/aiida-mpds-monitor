@@ -156,15 +156,18 @@ def test_loop_sends_only_overdue_calculations_to_shared_chat_and_continues_mpds(
             post.return_value.json.return_value = {"ok": failure is None}
         daemon.run_monitor_loop(config, MagicMock())
     mpds.assert_called_once()
-    post.assert_called_once()
-    assert post.call_args.args[0].endswith("/sendMessage")
-    payload = post.call_args.kwargs["json"]
+    assert post.call_count == 2
+    assert all(call.args[0].endswith("/sendMessage") for call in post.call_args_list)
+    payload = post.call_args_list[0].kwargs["json"]
     assert payload["chat_id"] == "-123"
     assert "User: @alice" in payload["text"]
     assert "PK: 123" in payload["text"]
     assert "PK: 456" not in payload["text"]
     assert "PK: 789" not in payload["text"]
     assert "Running time: at least 3 h 0 min" in payload["text"]
+    summary = post.call_args_list[1].kwargs["json"]
+    assert summary["chat_id"] == "-123"
+    assert summary["text"].endswith("RUNNING: 2\nRunning longer than 2 h: 1")
 
 
 def test_loop_waits_for_a_successful_scan_before_startup_notification():
@@ -188,7 +191,9 @@ def test_loop_waits_for_a_successful_scan_before_startup_notification():
             AttributeDict({**DEFAULT_CONFIG, "running_alert_hours": 2}), MagicMock()
         )
     assert attempts == 2
-    notifier.notify.assert_called_once()
+    assert notifier.notify.call_count == 2
+    assert "PK: 123" in notifier.notify.call_args_list[0].args[0]
+    assert "Calculation statistics" in notifier.notify.call_args_list[1].args[0]
 
 
 @pytest.mark.parametrize("state", ["finished", "excepted", "killed", "waiting", "created"])
@@ -362,6 +367,45 @@ def test_overdue_report_drops_finished_calculations_after_scan():
     node.process_state.value = "finished"
     tracker.observe(node, NOW)
     tracker.finish_scan()
+    assert tracker.overdue_report() is None
+
+
+def test_statistics_count_running_and_overdue_once_from_completed_scan():
+    tracker = RunningNotifications(MagicMock(), hours=0.5, user_name="alice")
+    overdue = make_node(pk=1)
+    boundary = make_node(pk=2)
+    scheduler_running = make_node("waiting", pk=3)
+    scheduler_running.get_scheduler_state = lambda: "running"
+    unknown_duration = make_node(pk=4)
+    unknown_duration.base.extras.get = MagicMock(side_effect=RuntimeError("unavailable"))
+    queued = make_node("waiting", pk=5)
+    queued.get_scheduler_state = lambda: "queued"
+    finished = make_node("finished", 0, pk=6)
+    tracker.begin_scan()
+    tracker.observe(overdue, NOW, running_since=NOW - timedelta(hours=1))
+    tracker.observe(overdue, NOW, running_since=NOW - timedelta(hours=1))
+    tracker.observe(boundary, NOW, running_since=NOW - timedelta(minutes=30))
+    tracker.observe(scheduler_running, NOW, running_since=NOW - timedelta(hours=2))
+    for node in (unknown_duration, queued, finished):
+        tracker.observe(node, NOW)
+    tracker.finish_scan()
+    expected = (
+        "📊 Calculation statistics (this monitor)\nUser: @alice\n"
+        "RUNNING: 4\nRunning longer than 0.5 h: 2"
+    )
+    assert tracker.statistics_report() == expected
+
+    # A partial next scan must not change the report or its counts.
+    tracker.begin_scan()
+    tracker.observe(boundary, NOW, running_since=NOW - timedelta(minutes=30))
+    assert tracker.statistics_report() == expected
+    tracker.finish_scan()
+    assert tracker.statistics_report().endswith("RUNNING: 1\nRunning longer than 0.5 h: 0")
+
+
+def test_empty_statistics():
+    tracker = RunningNotifications(MagicMock(), hours=24)
+    assert tracker.statistics_report().endswith("RUNNING: 0\nRunning longer than 24 h: 0")
     assert tracker.overdue_report() is None
 
 

@@ -2,9 +2,8 @@
 
 import logging
 import os
-import threading
 from abc import ABC, abstractmethod
-from typing import Callable, Mapping, Optional
+from typing import Mapping, Optional
 
 import requests
 from aiida.orm import ProcessNode
@@ -18,38 +17,19 @@ class Notifier(ABC):
     def notify(self, message: str) -> None:
         """Attempt delivery of a message."""
 
-    def start_command_polling(self, report: Callable[[], str]) -> None:
-        """Optionally start serving interactive commands."""
-
-    def stop_command_polling(self) -> None:
-        """Optionally stop serving interactive commands."""
-
-    def poll_commands(self, report: Callable[[], str], long_poll_timeout: int = 0) -> bool:
-        """Optionally serve requests for a current-process report."""
-        return True
-
-
 class TelegramNotifier(Notifier):
     def __init__(self, token: str, chat_id: str) -> None:
         self._url = f"https://api.telegram.org/bot{token}/sendMessage"
         self._chat_id = chat_id
-        self._offset = 0
-        self._command_thread: Optional[threading.Thread] = None
-        self._stop_commands = threading.Event()
 
     def notify(self, message: str) -> None:
         # Use a conservative chunk size, including for non-BMP Unicode characters.
         for start in range(0, len(message), 2000):
             self._send(message[start:start + 2000])
 
-    def _send(self, message: str, keyboard: bool = False) -> None:
+    def _send(self, message: str) -> None:
         try:
             payload = {"chat_id": self._chat_id, "text": message}
-            if keyboard:
-                payload["reply_markup"] = {
-                    "keyboard": [[{"text": "Running calculations"}]],
-                    "resize_keyboard": True,
-                }
             response = requests.post(
                 self._url,
                 json=payload,
@@ -61,69 +41,6 @@ class TelegramNotifier(Notifier):
         except (requests.RequestException, ValueError, AttributeError):
             # Request exceptions can contain the URL (and therefore the bot token).
             logger.warning("Telegram notification failed (HTTP, network, or invalid response)")
-
-    def start_command_polling(self, report: Callable[[], str]) -> None:
-        """Serve commands independently of the slower AiiDA monitor loop."""
-        if self._command_thread is not None and self._command_thread.is_alive():
-            return
-        self._stop_commands.clear()
-        self._command_thread = threading.Thread(
-            target=self._command_loop,
-            args=(report,),
-            name="telegram-command-poller",
-            daemon=True,
-        )
-        self._command_thread.start()
-
-    def stop_command_polling(self) -> None:
-        self._stop_commands.set()
-        if self._command_thread is not None:
-            self._command_thread.join(timeout=2)
-
-    def _command_loop(self, report: Callable[[], str]) -> None:
-        while not self._stop_commands.is_set():
-            if not self.poll_commands(report, long_poll_timeout=10):
-                self._stop_commands.wait(1)
-
-    def poll_commands(self, report: Callable[[], str], long_poll_timeout: int = 0) -> bool:
-        """Read commands using Telegram long polling; reject requests from other chats."""
-        try:
-            response = requests.post(
-                self._url.replace("/sendMessage", "/getUpdates"),
-                json={
-                    "offset": self._offset,
-                    "timeout": long_poll_timeout,
-                    "allowed_updates": ["message"],
-                },
-                timeout=long_poll_timeout + 5,
-            )
-            response.raise_for_status()
-            data = response.json()
-            if data.get("ok") is not True:
-                logger.warning("Telegram command polling rejected by API")
-                return False
-            for update in data["result"]:
-                update_id = update["update_id"]
-                if update_id < self._offset:
-                    continue
-                self._offset = update_id + 1
-                message = update.get("message", {})
-                if str(message.get("chat", {}).get("id")) != self._chat_id:
-                    continue
-                text = message.get("text", "").strip()
-                command = text.split("@", 1)[0]
-                if command in ("/start", "/help"):
-                    self._send(
-                        'Press "Running calculations" or send /running.',
-                        keyboard=True,
-                    )
-                elif command == "/running" or text == "Running calculations":
-                    self.notify(report())
-            return True
-        except Exception:
-            logger.warning("Telegram command polling failed; continuing monitoring")
-            return False
-
 
 def create_notifier(config: Optional[Mapping] = None) -> Optional[Notifier]:
     """Resolve Telegram settings from the environment, then YAML configuration."""

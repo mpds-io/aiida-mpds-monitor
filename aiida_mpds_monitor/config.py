@@ -15,6 +15,9 @@ DEFAULT_CONFIG = {
     "running_alert_hours": None,
     "telegram_bot_token": "",
     "telegram_chat_id": "",
+    "notification_time": "09:00",
+    "notification_timezone": "UTC",
+    "notification_user_names": {},
     "workchain_hierarchy": {
         "MPDSStructureWorkChain": {
             "BaseCrystalWorkChain": ["CrystalParallelCalculation"]

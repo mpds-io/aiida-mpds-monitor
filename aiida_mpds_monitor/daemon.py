@@ -21,6 +21,7 @@ from .filters import (
 from .generate_archive import generate_parent_archive
 from .notifications import create_notifier
 from .running import EXTRA_RUNNING, RunningNotifications, resolve_running_details
+from .scheduling import DailyReports
 from .status import (
     base_has_ready_children,
     EXTRA_ARCHIVE_PROCESSED,
@@ -546,41 +547,42 @@ def run_monitor_loop(config, logger, dry_run=False, no_commit=False, force=False
     after every poll interval.
     """
     notifier = None if dry_run else create_notifier(config)
-    running = (RunningNotifications(notifier, config.get("running_alert_hours"), no_commit)
-               if notifier else None)
-    command_polling_started = False
-    try:
-        while True:
-            try:
-                if dry_run:
-                    # In test mode, we emulate the behavior without sending
-                    scan_and_process_dry_run(config, logger, force=force)
-                else:
-                    if running is not None:
-                        try:
-                            running.begin_scan()
-                            scan_notifications(config, logger, running)
-                            if not command_polling_started:
-                                notifier.start_command_polling(running.report)
-                                command_polling_started = True
-                        except Exception:
-                            logger.warning("Notification scan failed; continuing MPDS monitoring")
-                    scan_and_process(config, logger, no_commit=no_commit, force=force)
+    running = (RunningNotifications(
+        notifier, config.get("running_alert_hours"), no_commit,
+        user_names=config.get("notification_user_names"),
+    ) if notifier else None)
+    reports = (DailyReports(
+        notifier, config.get("notification_time", "09:00"),
+        config.get("notification_timezone", "UTC"),
+    ) if notifier else None)
+    if running is not None and running.hours is None:
+        logger.warning("Scheduled reports disabled: set a positive running_alert_hours limit")
+    while True:
+        try:
+            if dry_run:
+                # In test mode, we emulate the behavior without sending
+                scan_and_process_dry_run(config, logger, force=force)
+            else:
+                if running is not None:
+                    try:
+                        running.begin_scan()
+                        scan_notifications(config, logger, running)
+                        reports.notify_if_due(running.overdue_report())
+                    except Exception:
+                        logger.warning("Notification scan failed; continuing MPDS monitoring")
+                scan_and_process(config, logger, no_commit=no_commit, force=force)
 
-                if force:
-                    force = False
-                    logger.info(
-                        "Forced resend scan completed; continuing in normal monitor mode"
-                    )
-            except KeyboardInterrupt:
-                logger.info("Shutting down gracefully...")
-                break
-            except Exception as e:
-                logger.exception(f"Unexpected error: {e}")
-            time.sleep(config.poll_interval)
-    finally:
-        if notifier is not None:
-            notifier.stop_command_polling()
+            if force:
+                force = False
+                logger.info(
+                    "Forced resend scan completed; continuing in normal monitor mode"
+                )
+        except KeyboardInterrupt:
+            logger.info("Shutting down gracefully...")
+            break
+        except Exception as e:
+            logger.exception(f"Unexpected error: {e}")
+        time.sleep(config.poll_interval)
 
 
 def main():

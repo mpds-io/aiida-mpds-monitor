@@ -9,7 +9,7 @@ import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterable, Optional
+from typing import Iterable, Mapping, Optional
 
 from aiida.orm import ProcessNode
 
@@ -131,8 +131,10 @@ def running_source(node: ProcessNode) -> Optional[str]:
 
 class RunningNotifications:
     def __init__(self, notifier: Notifier, hours: Optional[float] = None,
-                 no_commit: bool = False) -> None:
+                 no_commit: bool = False,
+                 user_names: Optional[Mapping[str, str]] = None) -> None:
         self.notifier = notifier
+        self.user_names = user_names if isinstance(user_names, Mapping) else {}
         self.hours = None
         if hours is not None:
             try:
@@ -223,8 +225,22 @@ class RunningNotifications:
         else:
             node.base.extras.set(EXTRA_RUNNING, interval)
 
-    @staticmethod
+    def _user_name(self, node: ProcessNode) -> str:
+        """Use the configured Telegram name or fall back to the AiiDA owner."""
+        user = getattr(node, "user", None)
+        email = getattr(user, "email", "") or ""
+        configured = self.user_names.get(email, "")
+        if isinstance(configured, str) and configured.strip():
+            return configured.strip()
+        name = " ".join(
+            part.strip() for part in (getattr(user, "first_name", ""),
+                                      getattr(user, "last_name", ""))
+            if isinstance(part, str) and part.strip()
+        )
+        return name or email or "Unknown user"
+
     def _describe(
+        self,
         node: ProcessNode,
         seconds: float,
         source: str = "process",
@@ -232,6 +248,7 @@ class RunningNotifications:
     ) -> str:
         minutes = int(seconds // 60)
         lines = [
+            f"User: {self._user_name(node)}",
             f"Name: {(node.label or '').strip() or '(label not set)'}",
             f"PK: {node.pk}",
         ]
@@ -250,3 +267,8 @@ class RunningNotifications:
         return "Current AiiDA calculations\n\n" + "\n\n".join(
             message for _, message in entries
         )
+
+    def overdue_report(self) -> Optional[str]:
+        """Return only calculations confirmed over the limit; otherwise stay silent."""
+        entries = [message for overdue, message in self._current.values() if overdue]
+        return "\n\n".join(entries) if entries else None

@@ -113,7 +113,9 @@ def test_observation_never_calls_delivery():
 
 def test_long_messages_are_split_without_losing_descriptions():
     message = "Calculation 🔬\n" * 1000
-    with patch("aiida_mpds_monitor.notifications.requests.post") as post:
+    with patch("aiida_mpds_monitor.notifications.requests.post") as post, patch(
+        "aiida_mpds_monitor.notifications.time.sleep"
+    ):
         post.return_value.json.return_value = {"ok": True}
         TelegramNotifier("secret", "123").notify(message)
     parts = [call.kwargs["json"]["text"] for call in post.call_args_list]
@@ -149,7 +151,7 @@ def test_loop_sends_only_overdue_calculations_to_shared_chat_and_continues_mpds(
         daemon, "scan_notifications", side_effect=observe
     ), patch.object(daemon, "scan_and_process", side_effect=KeyboardInterrupt) as mpds, patch(
         "aiida_mpds_monitor.notifications.requests.post"
-    ) as post:
+    ) as post, patch("aiida_mpds_monitor.notifications.time.sleep"):
         if failure == "network":
             post.side_effect = requests.Timeout("secret")
         else:

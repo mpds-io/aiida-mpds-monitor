@@ -2,6 +2,7 @@
 
 import logging
 import os
+import time
 from abc import ABC, abstractmethod
 from typing import Mapping, Optional
 
@@ -10,6 +11,9 @@ from aiida.orm import ProcessNode
 
 logger = logging.getLogger(__name__)
 EXTRA_NOTIFICATION_STATE = "monitor_notification_state"
+TELEGRAM_SEND_INTERVAL = 3.1  # Stay below the group limit of 20 messages per minute.
+TELEGRAM_SEND_ATTEMPTS = 3
+TELEGRAM_MAX_RETRY_AFTER = 60
 
 
 class Notifier(ABC):
@@ -22,6 +26,7 @@ class TelegramNotifier(Notifier):
     def __init__(self, token: str, chat_id: str) -> None:
         self._url = f"https://api.telegram.org/bot{token}/sendMessage"
         self._chat_id = chat_id
+        self._next_send_at = 0.0
 
     def notify(self, message: str) -> None:
         # Use a conservative chunk size, including for non-BMP Unicode characters.
@@ -29,19 +34,48 @@ class TelegramNotifier(Notifier):
             self._send(message[start:start + 2000])
 
     def _send(self, message: str) -> None:
-        try:
-            payload = {"chat_id": self._chat_id, "text": message}
-            response = requests.post(
-                self._url,
-                json=payload,
-                timeout=10,
-            )
-            response.raise_for_status()
-            if response.json().get("ok") is not True:
-                logger.warning("Telegram notification rejected by API")
-        except (requests.RequestException, ValueError, AttributeError):
-            # Request exceptions can contain the URL (and therefore the bot token).
-            logger.warning("Telegram notification failed (HTTP, network, or invalid response)")
+        for attempt in range(TELEGRAM_SEND_ATTEMPTS):
+            try:
+                delay = self._next_send_at - time.monotonic()
+                if delay > 0:
+                    time.sleep(delay)
+                self._next_send_at = time.monotonic() + TELEGRAM_SEND_INTERVAL
+                response = requests.post(
+                    self._url,
+                    json={"chat_id": self._chat_id, "text": message},
+                    timeout=10,
+                )
+                data = response.json()
+                if response.status_code == 429 or data.get("error_code") == 429:
+                    retry_after = (data.get("parameters") or {}).get("retry_after")
+                    if (
+                        type(retry_after) is int
+                        and 0 <= retry_after <= TELEGRAM_MAX_RETRY_AFTER
+                        and attempt + 1 < TELEGRAM_SEND_ATTEMPTS
+                    ):
+                        self._next_send_at = time.monotonic() + max(
+                            TELEGRAM_SEND_INTERVAL, retry_after
+                        )
+                        logger.warning(
+                            "Telegram rate limit reached; retrying rejected message in %s seconds",
+                            max(TELEGRAM_SEND_INTERVAL, retry_after),
+                        )
+                        continue
+                    logger.error(
+                        "Telegram notification rejected by rate limit; "
+                        "retry limit reached or retry_after missing, invalid, or over %s seconds",
+                        TELEGRAM_MAX_RETRY_AFTER,
+                    )
+                    return
+                response.raise_for_status()
+                if data.get("ok") is not True:
+                    logger.error("Telegram notification rejected by API")
+                return
+            except (requests.RequestException, ValueError, AttributeError, TypeError):
+                # Exceptions and API descriptions may contain the bot token.
+                # Do not retry ambiguous failures: Telegram may have accepted the message.
+                logger.error("Telegram notification failed (HTTP, network, or invalid response)")
+                return
 
 
 def create_notifier(config: Optional[Mapping] = None) -> Optional[Notifier]:

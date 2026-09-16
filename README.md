@@ -329,10 +329,17 @@ or invalid limit disables reports and logs a warning. Invalid time or timezone
 settings also disable reports with a warning. Restart the daemon after changing
 these settings.
 
-Daily checks are remembered in memory. A failed Telegram delivery is logged and
-is not retried in every polling cycle, because a timeout may occur after Telegram
+Daily checks are remembered in memory. HTTP/network failures are logged and
+are not retried in every polling cycle, because a timeout may occur after Telegram
 has already accepted the message. The next scheduled check or startup can report
 calculations that are still overdue. Long reports are split into multiple messages.
+Messages, including the final statistics, are spaced at least 3.1 seconds apart
+to respect Telegram's [group sending limit](https://core.telegram.org/bots/faq#my-bot-is-hitting-limits-how-do-i-avoid-this).
+When Telegram explicitly rejects a message with error 429, the monitor honors
+`retry_after` and retries that message up to twice, with at most 60 seconds per
+wait. Other monitor instances sharing the bot can also contribute to this limit.
+If delivery still fails, an ERROR is logged, visible at the daemon's default
+logging level. Large reports can therefore take some time to finish sending.
 
 ### Included calculations
 

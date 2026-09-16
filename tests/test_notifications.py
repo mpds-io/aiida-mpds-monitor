@@ -14,6 +14,29 @@ from aiida_mpds_monitor.notifications import (
     create_notifier,
     format_notification,
 )
+from aiida_mpds_monitor.scheduling import DailyReports
+
+
+@pytest.fixture
+def telegram_clock(monkeypatch):
+    clock = SimpleNamespace(now=0.0)
+
+    def advance(seconds):
+        clock.now += seconds
+
+    sleep = MagicMock(side_effect=advance)
+    monkeypatch.setattr("aiida_mpds_monitor.notifications.time.monotonic", lambda: clock.now)
+    monkeypatch.setattr("aiida_mpds_monitor.notifications.time.sleep", sleep)
+    return sleep
+
+
+def telegram_response(status=200, data=None):
+    response = MagicMock()
+    response.status_code = status
+    response.json.return_value = {"ok": True} if data is None else data
+    if status >= 400:
+        response.raise_for_status.side_effect = requests.HTTPError("secret")
+    return response
 
 
 def make_node(state="running", exit_status=None, pk=123):
@@ -70,6 +93,68 @@ def test_telegram_failures_are_safe_and_redacted(failure, caplog):
         TelegramNotifier("secret", "123").notify("test")
     assert "Telegram notification" in caplog.text
     assert "secret" not in caplog.text
+    assert post.call_count == 1  # Never retry an ambiguous network/HTTP failure.
+    assert caplog.records[-1].levelname == "ERROR"
+
+
+def test_message_spacing_is_preserved_between_details_and_summary(telegram_clock):
+    notifier = TelegramNotifier("secret", "-123")
+    with patch("aiida_mpds_monitor.notifications.requests.post") as post:
+        post.return_value = telegram_response()
+        notifier.notify("x" * 2500)
+        notifier.notify("statistics")
+    assert [call.kwargs["json"]["text"] for call in post.call_args_list] == [
+        "x" * 2000, "x" * 500, "statistics",
+    ]
+    assert [call.args[0] for call in telegram_clock.call_args_list] == pytest.approx([3.1, 3.1])
+
+
+@pytest.mark.parametrize("status", [200, 429])
+def test_final_statistics_retry_after_explicit_rate_limit(status, telegram_clock, caplog):
+    notifier = TelegramNotifier("secret", "-123")
+    limited = telegram_response(status, {
+        "ok": False, "error_code": 429, "description": "secret",
+        "parameters": {"retry_after": 7},
+    })
+    with patch("aiida_mpds_monitor.notifications.requests.post") as post:
+        post.side_effect = [telegram_response() for _ in range(3)] + [limited, telegram_response()]
+        DailyReports(notifier).notify_if_due("x" * 5000, summary="RUNNING: 29; over limit: 23")
+    texts = [call.kwargs["json"]["text"] for call in post.call_args_list]
+    assert texts == ["x" * 2000, "x" * 2000, "x" * 1000] + [
+        "RUNNING: 29; over limit: 23",
+    ] * 2
+    assert telegram_clock.call_args.args[0] == pytest.approx(7)
+    assert post.call_args.kwargs["timeout"] == 10
+    limited.raise_for_status.assert_not_called()
+    assert "retrying rejected message" in caplog.text
+    assert "secret" not in caplog.text
+
+
+def test_rate_limit_retries_are_bounded_and_log_failure(telegram_clock, caplog):
+    notifier = TelegramNotifier("secret", "-123")
+    with patch("aiida_mpds_monitor.notifications.requests.post") as post:
+        post.return_value = telegram_response(429, {
+            "ok": False, "error_code": 429, "parameters": {"retry_after": 60},
+        })
+        notifier.notify("statistics")
+    assert post.call_count == 3
+    assert [call.args[0] for call in telegram_clock.call_args_list] == [60, 60]
+    assert caplog.records[-1].levelname == "ERROR"
+    assert "rate limit" in caplog.records[-1].message
+
+
+@pytest.mark.parametrize("retry_after", [None, -1, 61, "7", True, [], float("inf")])
+def test_invalid_or_excessive_retry_delay_does_not_block_monitoring(
+    retry_after, telegram_clock, caplog
+):
+    with patch("aiida_mpds_monitor.notifications.requests.post") as post:
+        post.return_value = telegram_response(429, {
+            "ok": False, "error_code": 429, "parameters": {"retry_after": retry_after},
+        })
+        TelegramNotifier("secret", "-123").notify("statistics")
+    post.assert_called_once()
+    telegram_clock.assert_not_called()
+    assert caplog.records[-1].levelname == "ERROR"
 
 
 @pytest.mark.parametrize("state,code,event", [

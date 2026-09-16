@@ -211,14 +211,19 @@ aiida-mpds-submit 12345
 
 ## Telegram reports in a shared chat
 
-The bot sends reports containing **only RUNNING calculations that exceed
-`running_alert_hours`** to one shared Telegram group. Each entry identifies the
-calculation owner by their configured Telegram name.
+The monitor sends **RUNNING calculations that exceed `running_alert_hours`** to
+one shared Telegram group, followed by a separate statistics message. Each
+calculation entry identifies its owner, label, PK, execution hostname when
+available, and elapsed running time. Statistics include all RUNNING processes
+selected by this monitor, including those within the limit.
 
 Reports are checked after the first successful scan at daemon startup and once
 a day at the configured time. If no calculations are over the limit, the bot
-sends nothing. Commands and buttons, including `/running`, no longer request
-reports.
+sends nothing, including no statistics. The monitor only sends messages; it does
+not handle commands or buttons such as `/running`, or send completion/failure
+alerts when a process reaches a terminal state.
+
+### Setup
 
 1. Open [@BotFather](https://t.me/BotFather) in Telegram, send `/newbot`, and
    follow the prompts. Save the token it returns. See Telegram's
@@ -229,16 +234,17 @@ reports.
 3. Call the HTTPS Bot API method `getUpdates` using your token and read
    `result[].message.chat.id` from the reply. Group IDs may be negative.
    See [getUpdates](https://core.telegram.org/bots/api#getupdates).
-4. Set both variables in the environment of the daemon's service, then restart it:
+4. Set both variables in the environment of the daemon's service:
 
 ```bash
 export TELEGRAM_BOT_TOKEN="<token-from-BotFather>"
 export TELEGRAM_CHAT_ID="<shared-group-chat-id>"
-aiida-mpds-monitor --logging-level INFO
 ```
 
-Alternatively, add the settings to `~/.aiida/aiida_mpds_monitor/conf.yaml`
-(the configuration filename used by this application):
+5. Set a positive `running_alert_hours` in
+   `~/.aiida/aiida_mpds_monitor/conf.yaml`. Credentials alone do not enable
+   reports; the default limit is `null`. You can also put the credentials in
+   this file instead of using environment variables:
 
 ```yaml
 telegram_bot_token: "<token-from-BotFather>"
@@ -249,6 +255,12 @@ notification_timezone: "UTC"    # IANA timezone, e.g. Europe/Berlin
 notification_user_names:
   "alice@example.org": "@alice"
   "bob@example.org": "Bob Smith (@bob)"
+```
+
+6. Start or restart the daemon with the configured service environment:
+
+```bash
+aiida-mpds-monitor --logging-level INFO
 ```
 
 All users use the same bot token and group chat ID. Separate monitor instances
@@ -291,13 +303,12 @@ editing the configuration. Restrict access to a file containing your token with
 
 If neither setting is provided, notifications stay disabled. If only one is set,
 the daemon logs a startup warning (visible with `--logging-level WARNING` or
-more verbose). The existing YAML controls polling and which processes to watch:
+more verbose). `poll_interval` controls how often the daemon scans, and
+`workchain_hierarchy` selects process types for Telegram reports:
 
 ```yaml
 poll_interval: 30
 running_alert_hours: 24  # null (default) disables Telegram calculation reports
-monitor_filters:
-  max_age_hours: 168
 workchain_hierarchy:
   MPDSStructureWorkChain:
     BaseCrystalWorkChain:
@@ -329,17 +340,9 @@ or invalid limit disables reports and logs a warning. Invalid time or timezone
 settings also disable reports with a warning. Restart the daemon after changing
 these settings.
 
-Daily checks are remembered in memory. HTTP/network failures are logged and
-are not retried in every polling cycle, because a timeout may occur after Telegram
-has already accepted the message. The next scheduled check or startup can report
-calculations that are still overdue. Long reports are split into multiple messages.
-Messages, including the final statistics, are spaced at least 3.1 seconds apart
-to respect Telegram's [group sending limit](https://core.telegram.org/bots/faq#my-bot-is-hitting-limits-how-do-i-avoid-this).
-When Telegram explicitly rejects a message with error 429, the monitor honors
-`retry_after` and retries that message up to twice, with at most 60 seconds per
-wait. Other monitor instances sharing the bot can also contribute to this limit.
-If delivery still fails, an ERROR is logged, visible at the daemon's default
-logging level. Large reports can therefore take some time to finish sending.
+Daily checks are remembered in memory. The next scheduled check or startup can
+report calculations that are still overdue; crossing the limit does not trigger
+an immediate message during a polling cycle.
 
 ### Included calculations
 
@@ -398,23 +401,59 @@ when `notification_user_name` is configured. Statistics follow the existing
 startup/daily schedule and are sent only when the report contains overdue
 calculations; a check with none remains silent.
 
-AiiDA uses the scheduler's `dispatch_time` when the scheduler plugin provides it.
+The monitor uses the scheduler's `dispatch_time` when the scheduler plugin provides it.
 For YaScheduler, the monitor reads the RUNNING transition time from the task's
 `updated_at` value returned by `yastatus --json`. This allows existing jobs to
-show their actual elapsed execution time immediately after a monitor restart.
+show their elapsed execution time immediately after a monitor restart. The daemon
+looks for `yastatus` beside its Python executable, then on its service `PATH`.
+The command must have access to the YaScheduler configuration for these jobs.
+Its query has a 15-second timeout; failures log a warning and leave any available
+`dispatch_time` or fallback timer in use. Hostnames are omitted when unavailable.
 If the scheduler cannot provide a start timestamp, the monitor records its first
 RUNNING observation in the `monitor_running_interval` extra and reports a lower
-bound with **at least …**. Normal restarts retain that fallback timer;
+bound with **at least …**. The current message format uses this wording even
+when a scheduler timestamp is available. Normal restarts retain the fallback timer;
 `--no-commit` keeps it in memory only. Observing any other state resets the
-interval. This measures scheduler execution time when available, not CPU usage.
+interval, as does switching between process-based and scheduler-based RUNNING
+detection without a scheduler timestamp. Node creation and modification times
+do not determine the duration. This measures scheduler execution time when
+available, not CPU usage.
 Calculations with an unavailable duration are omitted from scheduled reports
 because they cannot be confirmed over the limit.
 
+### Delivery and failures
+
+Long reports are split into plain-text chunks of at most 2,000 characters;
+splitting can occur within a calculation entry. The final statistics follow the
+detail chunks. Send attempts from one monitor, including statistics and retries,
+are spaced at least 3.1 seconds apart to stay below Telegram's
+[group sending limit](https://core.telegram.org/bots/faq#my-bot-is-hitting-limits-how-do-i-avoid-this).
+Separate instances sharing the bot do not coordinate their send timing.
+
+For an explicit rate-limit rejection (HTTP status or API `error_code` 429), the
+monitor retries the rejected chunk up to twice. It accepts an integer
+`retry_after` from 0 through 60 seconds and waits at least 3.1 seconds before
+retrying. A missing, invalid, or larger delay ends that chunk's attempt with an
+ERROR; the monitor does not shorten a longer requested wait to 60 seconds.
+
+Other HTTP/network failures, invalid responses, and API rejections log an ERROR
+without a retry. A timeout may occur after Telegram has accepted the message.
+The monitor attempts subsequent chunks and the final statistics even if an
+earlier chunk fails, so receiving statistics does not confirm delivery of all
+details. The scheduled slot is consumed regardless of delivery success; failed
+messages do not trigger another attempt on each poll. Errors are visible at the
+daemon's default WARNING logging level, and notification error messages omit
+the bot token and API response descriptions.
+
+Sending and retry waits run in the daemon loop before MPDS processing, so a
+large report can delay the next webhook/archive scan. Notification failures do
+not stop MPDS monitoring; each HTTP request uses a 10-second timeout.
+
 `--dry-run` sends no Telegram requests and writes no tracking extras.
 The one-shot `aiida-mpds-submit` command does not send Telegram messages.
-Network/API failures are logged without stopping MPDS monitoring; requests use
-an HTTP timeout of 10 seconds. Existing webhook and archive processing continues
-normally.
+`--resend-all` replays eligible MPDS deliveries and does not override the Telegram
+schedule. `--no-commit` keeps fallback running timers in memory; restarting in
+this mode loses those timers unless the scheduler supplies a start timestamp.
 
 ## Testing with Stub Server
 

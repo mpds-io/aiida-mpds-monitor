@@ -34,26 +34,29 @@ def test_statistics_are_sent_last_only_when_a_report_is_due():
     ]
 
 
-def test_empty_report_does_not_send_statistics_alone():
+def test_empty_report_sends_statistics_alone_at_startup_and_daily():
     notifier = MagicMock()
     reports = DailyReports(notifier)
     reports.notify_if_due(None, NOW, summary="RUNNING: 0")
     reports.notify_if_due(None, NOW + timedelta(hours=1), summary="RUNNING: 5; overdue: 0")
-    notifier.notify.assert_not_called()
+    assert [call.args[0] for call in notifier.notify.call_args_list] == [
+        "RUNNING: 0", "RUNNING: 5; overdue: 0",
+    ]
 
 
-def test_statistics_query_runs_only_for_due_nonempty_reports():
+def test_statistics_query_runs_only_when_due_even_without_overdue_calculations():
     notifier = MagicMock()
     summary = MagicMock(return_value="Allocated servers (YaScheduler): 5")
     reports = DailyReports(notifier)
     reports.notify_if_due(None, NOW, summary=summary)
+    summary.assert_called_once_with()
     reports.notify_if_due("not due", NOW + timedelta(minutes=30), summary=summary)
-    summary.assert_not_called()
+    summary.assert_called_once_with()
     reports.notify_if_due("daily", NOW + timedelta(hours=1), summary=summary)
     reports.notify_if_due("duplicate", NOW + timedelta(hours=2), summary=summary)
-    summary.assert_called_once_with()
+    assert summary.call_count == 2
     assert [call.args[0] for call in notifier.notify.call_args_list] == [
-        "daily", "Allocated servers (YaScheduler): 5",
+        "Allocated servers (YaScheduler): 5", "daily", "Allocated servers (YaScheduler): 5",
     ]
 
 
@@ -64,6 +67,20 @@ def test_statistics_delivery_failure_does_not_crash_or_repeat(caplog):
     reports.notify_if_due("report", NOW + timedelta(hours=1), summary="statistics")
     reports.notify_if_due("duplicate", NOW + timedelta(hours=2), summary="duplicate statistics")
     assert notifier.notify.call_count == 2
+    assert "Scheduled notification failed" in caplog.text
+    assert "secret" not in caplog.text
+
+
+def test_statistics_only_failure_consumes_slot_and_recovers_next_day(caplog):
+    notifier = MagicMock()
+    notifier.notify.side_effect = [RuntimeError("secret"), None]
+    reports = DailyReports(notifier)
+    reports.notify_if_due(None, NOW + timedelta(hours=1), summary="startup statistics")
+    reports.notify_if_due(None, NOW + timedelta(hours=2), summary="duplicate")
+    notifier.notify.assert_called_once_with("startup statistics")
+    reports.notify_if_due(None, NOW + timedelta(days=1, hours=1), summary="daily statistics")
+    assert notifier.notify.call_count == 2
+    assert notifier.notify.call_args.args[0] == "daily statistics"
     assert "Scheduled notification failed" in caplog.text
     assert "secret" not in caplog.text
 

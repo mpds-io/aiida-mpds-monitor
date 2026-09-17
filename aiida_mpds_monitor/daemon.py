@@ -559,7 +559,7 @@ def run_monitor_loop(config, logger, dry_run=False, no_commit=False, force=False
         config.get("notification_timezone", "UTC"),
     ) if notifier else None)
     if running is not None and running.hours is None:
-        logger.warning("Scheduled reports disabled: set a positive running_alert_hours limit")
+        logger.info("Long-running alerts disabled; scheduled statistics remain enabled")
     while True:
         try:
             if dry_run:

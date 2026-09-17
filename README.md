@@ -219,7 +219,8 @@ selected by this monitor, including those within the limit.
 
 Reports are checked after the first successful scan at daemon startup and once
 a day at the configured time. If no calculations are over the limit, the bot
-sends nothing, including no statistics. The monitor only sends messages; it does
+sends the statistics message alone, including when RUNNING is zero. The monitor only
+sends messages; it does
 not handle commands or buttons such as `/running`, or send completion/failure
 alerts when a process reaches a terminal state.
 
@@ -242,8 +243,9 @@ export TELEGRAM_CHAT_ID="<shared-group-chat-id>"
 ```
 
 5. Set a positive `running_alert_hours` in
-   `~/.aiida/aiida_mpds_monitor/conf.yaml`. Credentials alone do not enable
-   reports; the default limit is `null`. You can also put the credentials in
+   `~/.aiida/aiida_mpds_monitor/conf.yaml` to enable long-running calculation alerts.
+   Statistics are enabled by the credentials even when the limit is `null`.
+   You can also put the credentials in
    this file instead of using environment variables:
 
 ```yaml
@@ -308,7 +310,7 @@ more verbose). `poll_interval` controls how often the daemon scans, and
 
 ```yaml
 poll_interval: 30
-running_alert_hours: 24  # null (default) disables Telegram calculation reports
+running_alert_hours: 24  # null (default) disables long-running alerts; statistics still send
 workchain_hierarchy:
   MPDSStructureWorkChain:
     BaseCrystalWorkChain:
@@ -331,12 +333,14 @@ check.
 
 Each daily check runs once per local calendar date, even when daylight saving
 time repeats an hour. If the scheduled time is skipped by a clock change, the
-first successful scan afterward performs the check. An empty check also consumes
-the day's slot: calculations crossing the limit later wait until the next report.
+first successful scan afterward performs the check. A check with no overdue
+calculations sends statistics and consumes the day's slot: calculations crossing
+the limit later wait until the next report.
 
 `running_alert_hours` must be positive; fractional values such as `0.5` are
 supported. Only durations **strictly greater** than the limit qualify. A missing
-or invalid limit disables reports and logs a warning. Invalid time or timezone
+or invalid limit disables long-running alerts; statistics remain enabled. An invalid
+limit logs a warning. Invalid time or timezone
 settings also disable reports with a warning. Restart the daemon after changing
 these settings.
 
@@ -382,8 +386,8 @@ Hostname: compute-17
 Running time: at least 25 h 17 min
 ```
 
-After the calculation details, the bot sends a separate final message with
-statistics from the same completed scan:
+At startup and each daily report time, the bot sends a statistics message from the
+completed scan. When there are overdue calculations, their details are sent first:
 
 ```text
 📊 Calculation statistics (this monitor)
@@ -398,9 +402,9 @@ The totals cover all RUNNING processes selected by this monitor's
 unknown duration count toward RUNNING but cannot count as over the limit.
 Queued and terminal processes are excluded. Counts are local to this monitor;
 they are not combined across machines sharing the chat. The `User` line appears
-when `notification_user_name` is configured. Statistics follow the existing
-startup/daily schedule and are sent only when the report contains overdue
-calculations; a check with none remains silent.
+when `notification_user_name` is configured. Statistics follow the startup/daily
+schedule even when there are no overdue or running calculations, or when
+`running_alert_hours` is disabled.
 
 `Allocated servers (YaScheduler)` counts enabled records in `yascheduler_nodes`
 using the database connection settings loaded from the installed YaScheduler

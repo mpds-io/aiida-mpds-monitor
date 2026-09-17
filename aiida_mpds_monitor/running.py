@@ -335,7 +335,7 @@ class RunningNotifications:
         )
 
     def overdue_report(self) -> Optional[str]:
-        """Return only calculations confirmed over the limit; otherwise stay silent."""
+        """Return calculations confirmed over the limit, or None when there are none."""
         entries = [message for overdue, message in self._current.values() if overdue]
         return "\n\n".join(entries) if entries else None
 

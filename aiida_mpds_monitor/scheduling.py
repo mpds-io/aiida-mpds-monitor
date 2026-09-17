@@ -58,10 +58,10 @@ class DailyReports:
         self._started = True
         if daily_due:
             self._last_daily_date = local_now.date()
-        if report:
-            try:
+        try:
+            if report:
                 self.notifier.notify(report)
-                if summary:
-                    self.notifier.notify(summary() if callable(summary) else summary)
-            except Exception:
-                logger.warning("Scheduled notification failed; continuing monitoring")
+            if summary:
+                self.notifier.notify(summary() if callable(summary) else summary)
+        except Exception:
+            logger.warning("Scheduled notification failed; continuing monitoring")

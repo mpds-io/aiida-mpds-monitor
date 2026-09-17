@@ -221,13 +221,15 @@ def test_report_excludes_nonrunning_nodes(state):
 
 
 @pytest.mark.parametrize("hours", [None, 2])
-def test_monitor_without_overdue_calculations_sends_no_telegram_messages(hours, server_query):
+@pytest.mark.parametrize("running_count", [0, 1])
+def test_monitor_without_overdue_calculations_sends_statistics(hours, running_count, server_query):
     notifier = MagicMock()
 
     def observe(config, logger, running):
-        node = make_node()
-        running.observe(node, NOW)
-        running.observe(node, NOW + timedelta(hours=1))
+        if running_count:
+            node = make_node()
+            running.observe(node, NOW)
+            running.observe(node, NOW + timedelta(hours=1))
         running.observe(make_node("finished", 0, pk=2), NOW)
         running.finish_scan()
 
@@ -237,8 +239,17 @@ def test_monitor_without_overdue_calculations_sends_no_telegram_messages(hours, 
         daemon.run_monitor_loop(
             AttributeDict({**DEFAULT_CONFIG, "running_alert_hours": hours}), MagicMock()
         )
-    notifier.notify.assert_not_called()
-    server_query.assert_not_called()
+    notifier.notify.assert_called_once()
+    message = notifier.notify.call_args.args[0]
+    assert "Calculation statistics (this monitor)" in message
+    assert "Allocated servers (YaScheduler): 5" in message
+    assert f"RUNNING: {running_count}\n" in message
+    assert "LONG-RUNNING CALCULATION" not in message
+    if hours is not None:
+        assert f"Running longer than {hours} h: 0" in message
+    else:
+        assert "Running time limit: disabled" in message
+    server_query.assert_called_once()
 
 
 def test_timer_storage_failure_does_not_hide_running_calculation():

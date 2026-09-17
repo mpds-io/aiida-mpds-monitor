@@ -388,6 +388,7 @@ statistics from the same completed scan:
 ```text
 📊 Calculation statistics (this monitor)
 User: @alice
+Allocated servers (YaScheduler): 5
 RUNNING: 12
 Running longer than 24 h: 3
 ```
@@ -400,6 +401,26 @@ they are not combined across machines sharing the chat. The `User` line appears
 when `notification_user_name` is configured. Statistics follow the existing
 startup/daily schedule and are sent only when the report contains overdue
 calculations; a check with none remains silent.
+
+`Allocated servers (YaScheduler)` counts enabled records in `yascheduler_nodes`
+using the database connection settings loaded from the installed YaScheduler
+configuration API (`CONFIG_FILE`, including `YASCHEDULER_CONF_PATH` overrides).
+The monitor runs `SELECT COUNT(*) FROM yascheduler_nodes WHERE enabled=TRUE;`
+through `pg8000`, following the same database source as `yanodes`. It includes
+busy and idle servers across all cloud providers and static nodes; disabled
+records and pending disabled allocation placeholders are excluded. This count
+covers the scheduler's server inventory independently of `workchain_hierarchy`
+and calculation owners. It does not query the Hetzner Cloud API.
+Monitors connected to the same YaScheduler database report the same inventory;
+their server counts should not be added together.
+
+The database query runs only when sending statistics, with a 15-second connection
+socket timeout and a 15-second SQL statement timeout. Both legacy and current
+YaScheduler configuration APIs are supported. YaScheduler and its `pg8000`
+dependency must be installed in the monitor's Python environment. Configuration,
+connection, and query failures log an ERROR with the failed stage and exception
+type, and show `unavailable` rather than zero; calculation reports still send
+normally. Credentials and exception details are omitted from logs.
 
 The monitor uses the scheduler's `dispatch_time` when the scheduler plugin provides it.
 For YaScheduler, the monitor reads the RUNNING transition time from the task's

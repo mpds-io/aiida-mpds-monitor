@@ -20,7 +20,9 @@ from .filters import (
 )
 from .generate_archive import generate_parent_archive
 from .notifications import create_notifier
-from .running import EXTRA_RUNNING, RunningNotifications, resolve_running_details
+from .running import (
+    EXTRA_RUNNING, RunningNotifications, resolve_allocated_servers, resolve_running_details,
+)
 from .scheduling import DailyReports
 from .status import (
     base_has_ready_children,
@@ -569,7 +571,10 @@ def run_monitor_loop(config, logger, dry_run=False, no_commit=False, force=False
                         running.begin_scan()
                         scan_notifications(config, logger, running)
                         reports.notify_if_due(
-                            running.overdue_report(), summary=running.statistics_report()
+                            running.overdue_report(),
+                            summary=lambda: running.statistics_report(
+                                allocated_servers=resolve_allocated_servers(logger)
+                            ),
                         )
                     except Exception:
                         logger.warning("Notification scan failed; continuing MPDS monitoring")

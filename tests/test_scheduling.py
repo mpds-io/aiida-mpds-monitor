@@ -42,6 +42,21 @@ def test_empty_report_does_not_send_statistics_alone():
     notifier.notify.assert_not_called()
 
 
+def test_statistics_query_runs_only_for_due_nonempty_reports():
+    notifier = MagicMock()
+    summary = MagicMock(return_value="Allocated servers (YaScheduler): 5")
+    reports = DailyReports(notifier)
+    reports.notify_if_due(None, NOW, summary=summary)
+    reports.notify_if_due("not due", NOW + timedelta(minutes=30), summary=summary)
+    summary.assert_not_called()
+    reports.notify_if_due("daily", NOW + timedelta(hours=1), summary=summary)
+    reports.notify_if_due("duplicate", NOW + timedelta(hours=2), summary=summary)
+    summary.assert_called_once_with()
+    assert [call.args[0] for call in notifier.notify.call_args_list] == [
+        "daily", "Allocated servers (YaScheduler): 5",
+    ]
+
+
 def test_statistics_delivery_failure_does_not_crash_or_repeat(caplog):
     notifier = MagicMock()
     notifier.notify.side_effect = [None, RuntimeError("secret")]

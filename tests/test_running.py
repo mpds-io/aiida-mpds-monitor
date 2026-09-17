@@ -13,12 +13,21 @@ from aiida_mpds_monitor.running import (
     EXTRA_RUNNING,
     RunningNotifications,
     _yastatus_executable,
+    _yascheduler_db_config,
+    resolve_allocated_servers,
     resolve_running_details,
     resolve_running_since,
 )
 from tests.test_notifications import make_node
 
 NOW = datetime(2026, 9, 7, tzinfo=timezone.utc)
+
+
+@pytest.fixture(autouse=True)
+def server_query(monkeypatch):
+    query = MagicMock(return_value=5)
+    monkeypatch.setattr(daemon, "resolve_allocated_servers", query)
+    return query
 
 
 def test_running_report_uses_exact_webhook_payload_and_observed_time():
@@ -123,6 +132,7 @@ def test_long_messages_are_split_without_losing_descriptions():
     assert all(len(part.encode("utf-16-le")) // 2 <= 4096 for part in parts)
 
 
+@pytest.mark.parametrize("server_count", [5, None])
 @pytest.mark.parametrize("failure", [None, "network", "api"])
 @pytest.mark.parametrize("owner_config", [
     {"notification_user_names": {"alice@example.org": "@alice"}},
@@ -130,8 +140,9 @@ def test_long_messages_are_split_without_losing_descriptions():
     {"notification_user_name": "@alice"},
 ])
 def test_loop_sends_only_overdue_calculations_to_shared_chat_and_continues_mpds(
-    failure, owner_config
+    failure, owner_config, server_count, server_query
 ):
+    server_query.return_value = server_count
     notifier = TelegramNotifier("secret", "-123")
     config = AttributeDict({
         **DEFAULT_CONFIG,
@@ -169,6 +180,9 @@ def test_loop_sends_only_overdue_calculations_to_shared_chat_and_continues_mpds(
     assert "Running time: at least 3 h 0 min" in payload["text"]
     summary = post.call_args_list[1].kwargs["json"]
     assert summary["chat_id"] == "-123"
+    expected_servers = server_count if server_count is not None else "unavailable"
+    assert f"Allocated servers (YaScheduler): {expected_servers}\n" in summary["text"]
+    server_query.assert_called_once()
     assert summary["text"].endswith("RUNNING: 2\nRunning longer than 2 h: 1")
 
 
@@ -207,7 +221,7 @@ def test_report_excludes_nonrunning_nodes(state):
 
 
 @pytest.mark.parametrize("hours", [None, 2])
-def test_monitor_without_overdue_calculations_sends_no_telegram_messages(hours):
+def test_monitor_without_overdue_calculations_sends_no_telegram_messages(hours, server_query):
     notifier = MagicMock()
 
     def observe(config, logger, running):
@@ -224,6 +238,7 @@ def test_monitor_without_overdue_calculations_sends_no_telegram_messages(hours):
             AttributeDict({**DEFAULT_CONFIG, "running_alert_hours": hours}), MagicMock()
         )
     notifier.notify.assert_not_called()
+    server_query.assert_not_called()
 
 
 def test_timer_storage_failure_does_not_hide_running_calculation():
@@ -393,6 +408,7 @@ def test_statistics_count_running_and_overdue_once_from_completed_scan():
     tracker.finish_scan()
     expected = (
         "📊 Calculation statistics (this monitor)\nUser: @alice\n"
+        "Allocated servers (YaScheduler): unavailable\n"
         "RUNNING: 4\nRunning longer than 0.5 h: 2"
     )
     assert tracker.statistics_report() == expected
@@ -482,3 +498,114 @@ def test_yastatus_is_resolved_next_to_virtualenv_python():
         "aiida_mpds_monitor.running.Path.is_file", return_value=True
     ):
         assert _yastatus_executable() == "/opt/aiida/bin/yastatus"
+
+
+@pytest.fixture
+def scheduler_db():
+    db = SimpleNamespace(
+        user="scheduler", password="secret", database="scheduler_db", host="localhost", port=5432
+    )
+    driver = MagicMock()
+    connection = driver.connect.return_value
+    cursor = connection.cursor.return_value
+    cursor.fetchone.return_value = (5,)
+    with patch("aiida_mpds_monitor.running._yascheduler_db_config", return_value=db) as load, patch(
+        "aiida_mpds_monitor.running.import_module", return_value=driver
+    ):
+        yield SimpleNamespace(db=db, driver=driver, connection=connection, cursor=cursor, load=load)
+
+
+@pytest.mark.parametrize("count", [0, 5])
+def test_allocated_servers_queries_enabled_inventory_and_closes(scheduler_db, count):
+    scheduler_db.cursor.fetchone.return_value = (count,)
+    assert resolve_allocated_servers() == count
+    scheduler_db.driver.connect.assert_called_once_with(
+        user="scheduler", password="secret", database="scheduler_db", host="localhost",
+        port=5432, timeout=15,
+    )
+    assert [call.args[0] for call in scheduler_db.cursor.execute.call_args_list] == [
+        "SET statement_timeout = 15000",
+        "SELECT COUNT(*) FROM yascheduler_nodes WHERE enabled=TRUE;",
+    ]
+    scheduler_db.cursor.close.assert_called_once_with()
+    scheduler_db.connection.close.assert_called_once_with()
+    assert f"Allocated servers (YaScheduler): {count}\n" in (
+        RunningNotifications(MagicMock()).statistics_report(count)
+    )
+
+
+@pytest.mark.parametrize("stage", ["config", "connect", "cursor", "query", "fetch"])
+def test_server_database_failure_is_unavailable_and_redacted(scheduler_db, stage, caplog):
+    operations = {
+        "config": scheduler_db.load,
+        "connect": scheduler_db.driver.connect,
+        "cursor": scheduler_db.connection.cursor,
+        "query": scheduler_db.cursor.execute,
+        "fetch": scheduler_db.cursor.fetchone,
+    }
+    operations[stage].side_effect = RuntimeError("password=secret")
+    assert resolve_allocated_servers() is None
+    assert "Could not count YaScheduler servers while" in caplog.text
+    assert "RuntimeError" in caplog.text
+    assert "secret" not in caplog.text
+    assert all(record.levelname == "ERROR" for record in caplog.records)
+    if stage in ("cursor", "query", "fetch"):
+        scheduler_db.connection.close.assert_called_once_with()
+    if stage in ("query", "fetch"):
+        scheduler_db.cursor.close.assert_called_once_with()
+    assert "Allocated servers (YaScheduler): unavailable" in (
+        RunningNotifications(MagicMock()).statistics_report()
+    )
+
+
+@pytest.mark.parametrize("row", [None, (), (-1,), (True,), ("5",)])
+def test_invalid_database_count_is_unavailable(scheduler_db, row):
+    scheduler_db.cursor.fetchone.return_value = row
+    assert resolve_allocated_servers() is None
+    scheduler_db.cursor.close.assert_called_once_with()
+    scheduler_db.connection.close.assert_called_once_with()
+
+
+def test_server_connection_is_closed_even_when_cursor_close_fails(scheduler_db, caplog):
+    scheduler_db.cursor.close.side_effect = RuntimeError("secret")
+    assert resolve_allocated_servers() == 5
+    scheduler_db.connection.close.assert_called_once_with()
+    assert "Could not close YaScheduler database resource" in caplog.text
+    assert "secret" not in caplog.text
+
+
+def test_server_query_loads_legacy_config_like_user_script():
+    config = MagicMock()
+    db = config.Config.from_config_parser.return_value.db
+    modules = {
+        "yascheduler.config": config,
+        "yascheduler.variables": SimpleNamespace(CONFIG_FILE="/custom/yascheduler.conf"),
+    }
+    with patch("aiida_mpds_monitor.running.import_module", side_effect=modules.__getitem__):
+        assert _yascheduler_db_config() is db
+    config.Config.from_config_parser.assert_called_once_with("/custom/yascheduler.conf")
+
+
+def test_server_query_loads_current_config_api():
+    parser = MagicMock()
+    modules = {
+        "yascheduler.entrypoints.config_parser": parser,
+        "yascheduler.entrypoints.paths": SimpleNamespace(CONFIG_FILE="/custom/yascheduler.conf"),
+    }
+
+    def import_scheduler_module(name):
+        if name == "yascheduler.config":
+            raise ModuleNotFoundError(name="yascheduler.config")
+        return modules[name]
+
+    with patch("aiida_mpds_monitor.running.import_module", side_effect=import_scheduler_module):
+        assert _yascheduler_db_config() is parser.parse_config.return_value.db
+    parser.parse_config.assert_called_once_with("/custom/yascheduler.conf")
+
+
+def test_missing_dependency_does_not_fall_back_to_different_config_api():
+    with patch("aiida_mpds_monitor.running.import_module") as load:
+        load.side_effect = ModuleNotFoundError(name="hcloud")
+        with pytest.raises(ModuleNotFoundError):
+            _yascheduler_db_config()
+    load.assert_called_once_with("yascheduler.config")

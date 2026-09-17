@@ -3,7 +3,7 @@
 import logging
 import re
 from datetime import date, datetime, time, timezone
-from typing import Optional
+from typing import Callable, Optional, Union
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .notifications import Notifier
@@ -41,7 +41,7 @@ class DailyReports:
 
     def notify_if_due(
         self, report: Optional[str], now: Optional[datetime] = None,
-        summary: Optional[str] = None,
+        summary: Optional[Union[str, Callable[[], str]]] = None,
     ) -> None:
         if self._time is None:
             return
@@ -62,6 +62,6 @@ class DailyReports:
             try:
                 self.notifier.notify(report)
                 if summary:
-                    self.notifier.notify(summary)
+                    self.notifier.notify(summary() if callable(summary) else summary)
             except Exception:
                 logger.warning("Scheduled notification failed; continuing monitoring")

@@ -9,8 +9,9 @@ import subprocess
 import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from importlib import import_module
 from pathlib import Path
-from typing import Iterable, Mapping, Optional
+from typing import Any, Iterable, Mapping, Optional
 
 from aiida.orm import ProcessNode
 
@@ -34,11 +35,68 @@ def _aware(value: datetime) -> datetime:
 
 
 def _yastatus_executable() -> str:
-    """Find yastatus in the application virtual environment or service PATH."""
-    sibling = Path(sys.executable).with_name("yastatus")
+    """Find yastatus beside Python or on the service PATH."""
+    name = "yastatus"
+    sibling = Path(sys.executable).with_name(name)
     if sibling.is_file():
         return str(sibling)
-    return shutil.which("yastatus") or "yastatus"
+    return shutil.which(name) or name
+
+
+def _yascheduler_db_config() -> Any:
+    """Load connection settings through the installed YaScheduler configuration API."""
+    try:
+        config_module = import_module("yascheduler.config")
+        paths = import_module("yascheduler.variables")
+    except ModuleNotFoundError as exc:
+        if exc.name not in ("yascheduler.config", "yascheduler.variables"):
+            raise
+        parser = import_module("yascheduler.entrypoints.config_parser")
+        paths = import_module("yascheduler.entrypoints.paths")
+        return parser.parse_config(paths.CONFIG_FILE).db
+    return config_module.Config.from_config_parser(paths.CONFIG_FILE).db
+
+
+def resolve_allocated_servers(logger_: logging.Logger = logger) -> Optional[int]:
+    """Count enabled servers directly in the configured YaScheduler database."""
+    connection = None
+    cursor = None
+    stage = "loading configuration"
+    try:
+        db = _yascheduler_db_config()
+        pg8000 = import_module("pg8000")
+        stage = "connecting to database"
+        connection = pg8000.connect(
+            user=db.user,
+            password=db.password,
+            database=db.database,
+            host=db.host,
+            port=db.port,
+            timeout=15,
+        )
+        stage = "querying enabled servers"
+        cursor = connection.cursor()
+        cursor.execute("SET statement_timeout = 15000")
+        cursor.execute("SELECT COUNT(*) FROM yascheduler_nodes WHERE enabled=TRUE;")
+        row = cursor.fetchone()
+        if not row or type(row[0]) is not int or row[0] < 0:
+            raise ValueError("Invalid server count")
+        return row[0]
+    except Exception as exc:
+        # Connection/configuration errors may contain credentials; log only the type.
+        logger_.error(
+            "Could not count YaScheduler servers while %s (%s)", stage, type(exc).__name__
+        )
+        return None
+    finally:
+        for resource in (cursor, connection):
+            if resource is not None:
+                try:
+                    resource.close()
+                except Exception as exc:
+                    logger_.error(
+                        "Could not close YaScheduler database resource (%s)", type(exc).__name__
+                    )
 
 
 def resolve_running_details(
@@ -281,13 +339,15 @@ class RunningNotifications:
         entries = [message for overdue, message in self._current.values() if overdue]
         return "\n\n".join(entries) if entries else None
 
-    def statistics_report(self) -> str:
+    def statistics_report(self, allocated_servers: Optional[int] = None) -> str:
         """Summarize running processes from the same completed scan as the report."""
         entries = list(self._current.values())
         overdue_count = sum(overdue for overdue, _ in entries)
         lines = ["📊 Calculation statistics (this monitor)"]
         if self.user_name:
             lines.append(f"User: {self.user_name}")
+        servers = allocated_servers if allocated_servers is not None else "unavailable"
+        lines.append(f"Allocated servers (YaScheduler): {servers}")
         lines.append(f"RUNNING: {len(entries)}")
         if self.hours is not None:
             lines.append(f"Running longer than {self.hours:g} h: {overdue_count}")

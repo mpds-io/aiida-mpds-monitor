@@ -24,8 +24,8 @@ On first run the tool writes a default config file at
 ```yaml
 webhook_url: "http://localhost:8080"
 
-# Separate endpoint for archive uploads. Leave empty to derive from
-# webhook_url + "/upload/absolidix" (deprecated, will log a warning).
+# Separate endpoint for archive uploads. Leave empty to use ARCHIVE_UPLOAD_URL
+# from the environment, or the built-in upload endpoint if it is unset.
 archive_upload_url: "http://localhost:8080"
 
 # Keep .7z archives on disk after upload? (default: false — delete on success)
@@ -72,6 +72,57 @@ log_level: "WARNING"          # DEBUG, INFO, WARNING, ERROR
 log_max_bytes: 10485760       # 10 MB
 log_backup_count: 5
 ```
+
+### YAML settings and environment variables
+
+`—` means there is no environment equivalent. Dotted keys are nested under
+`monitor_filters` in YAML. Environment variables take priority for authentication
+and Telegram settings; `archive_upload_url` in YAML takes priority over
+`ARCHIVE_UPLOAD_URL`.
+
+| YAML key | Environment equivalent | Description |
+| --- | --- | --- |
+| `webhook_url` | — | URL receiving calculation status webhooks. |
+| `auth_key` | `MPDS_MONITOR_KEY` | Authentication key included in webhook form data. |
+| `poll_interval` | — | Seconds between monitor scans (default: `30`). |
+| `workchain_hierarchy` | — | Map of parent, child, and grandchild process labels to monitor. |
+| `archive_upload_url` | `ARCHIVE_UPLOAD_URL` | Archive upload URL; uses the built-in endpoint if both are unset. |
+| `archive_key` | `MPDS_ARCHIVE_KEY` | Archive authentication token; falls back to the webhook key if both are unset. |
+| `archive_bid` | — | Optional identifier sent as the archive upload's `bid` form field. |
+| `archive_schema_id` | — | Optional identifier sent as the archive upload's `schema_id` form field. |
+| `archive_keep` | — | Keep local archives after successful upload (default: `false`); failures always retain them. |
+| `send_archive` | — | Enable archive generation and upload (default: `true`). |
+| `send_archives_all_stages_ready` | — | Require all configured subcalculations to succeed before archiving (default: `false`). |
+| `telegram_bot_token` | `TELEGRAM_BOT_TOKEN` | Bot token; required together with a chat ID to enable Telegram reports. |
+| `telegram_chat_id` | `TELEGRAM_CHAT_ID` | Destination chat or group ID for Telegram reports. |
+| `notification_time` | — | Daily report time in `HH:MM` format (default: `09:00`). |
+| `notification_timezone` | — | IANA timezone for daily reports (default: `UTC`). |
+| `notification_user_name` | — | Default user name shown in this monitor's Telegram reports. |
+| `notification_user_names` | — | Map of AiiDA owner emails to names or Telegram usernames. |
+| `running_alert_hours` | — | Running duration limit in hours; `null` disables long-running alerts, while statistics still send. |
+| `log_file` | — | Path to the monitor's log file. |
+| `log_level` | — | YAML logging level; the daemon CLI overrides it with `--logging-level` (default: `ERROR`). |
+| `log_max_bytes` | — | Log rotation size in bytes (default: `10485760`). |
+| `log_backup_count` | — | Number of rotated log files to retain (default: `3`). |
+| `monitor_filters` | — | Optional filters for automatic MPDS processing; Telegram reports ignore them. |
+| `monitor_filters.created_after` | — | Inclusive earliest parent creation date or ISO 8601 timestamp. |
+| `monitor_filters.created_before` | — | Inclusive latest parent creation date or ISO 8601 timestamp. |
+| `monitor_filters.max_age_hours` | — | Scan parents no older than this many hours; combines with `created_after` using the stricter bound. |
+| `monitor_filters.element_counts` | — | Allowed distinct element counts in workflow label formulas, such as `[3, 4]`. |
+| `monitor_filters.element_count_greater_than` | — | Exclusive lower bound on distinct element counts. |
+| `monitor_filters.compounds` | — | Exact formulas to match at the beginning of workflow labels. |
+| `monitor_filters.elements` | — | Element symbols that workflow label formulas must contain. |
+| `monitor_filters.elements_match` | — | Match `any` (default) or `all` configured element symbols. |
+
+For webhook authentication, resolution is `MPDS_MONITOR_KEY`, then `auth_key`,
+then `security_key`. Archive authentication uses `MPDS_ARCHIVE_KEY`, then
+`archive_key`, then that webhook authentication key. Telegram settings use the
+environment variable, then the lowercase YAML key, then its uppercase YAML alias.
+
+Restart an already running monitor after changing YAML settings or environment
+variables. For environment changes, start it from a shell or service with the new
+values. If the upload server reports `Token has expired`, replace the archive
+token with a valid one before restarting.
 
 ## Usage
 
@@ -524,7 +575,5 @@ a structure is included when at least one configured subcalculation succeeds.
 Set `true` to include structures only after all configured subcalculations succeed.
 
 Before creating the `.7z`, the monitor checks that the collected contents contain at least one non-empty calculation folder. With `send_archives_all_stages_ready: true`, every process below the selected base workchains must also have completed successfully (`is_finished_ok`). The number of calculation folders and their filenames are workflow-dependent. Failing an applicable check prevents archive creation and upload.
-
-**`archive_key`** is the auth key sent with archive uploads. Resolution order: `MPDS_ARCHIVE_KEY` environment variable, then `archive_key` from config, then `MPDS_MONITOR_KEY` (the webhook key) as a fallback. This lets archive and webhook endpoints use separate credentials.
 
 Copyright © 2026 Materials Platform for Data Science OÜ

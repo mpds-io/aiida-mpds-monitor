@@ -1,14 +1,20 @@
 import logging
 import logging.handlers
+import math
 import os
 import sys
 import time
+from pathlib import Path
 from typing import Optional
 
 from aiida import load_profile
+from aiida.common.extendeddicts import AttributeDict
 from aiida.orm import ProcessNode, QueryBuilder, WorkChainNode
 
-from .config import get_archive_key, get_auth_key, load_config, resolve_archive_upload_url
+from .config import (
+    DEFAULT_CONFIG_PATH, get_archive_key, get_auth_key, load_config, read_config,
+    resolve_archive_upload_url,
+)
 from .filters import (
     build_parent_query_filters,
     count_compound_elements,
@@ -89,11 +95,9 @@ def filter_nodes_by_element_count(
 
 def setup_logger(config):
     logger = logging.getLogger("aiida_mpds_monitor")
-    logger.setLevel(getattr(logging, config.log_level.upper()))
-    # Clear existing handlers
-    logger.handlers.clear()
+    log_level = getattr(logging, config.log_level.upper())
     # File handler with rotation
-    log_dir = os.path.dirname(config.log_file)
+    log_dir = os.path.dirname(config.log_file) or "."
     os.makedirs(log_dir, exist_ok=True)
     file_handler = logging.handlers.RotatingFileHandler(
         config.log_file,
@@ -105,10 +109,15 @@ def setup_logger(config):
         datefmt="%Y-%m-%d %H:%M:%S",
     )
     file_handler.setFormatter(file_formatter)
-    logger.addHandler(file_handler)
     # Console handler (optional, can be removed in production)
     console_handler = logging.StreamHandler(sys.stdout)
     console_handler.setFormatter(file_formatter)
+    # Construct the replacement before closing working handlers.
+    for handler in logger.handlers[:]:
+        logger.removeHandler(handler)
+        handler.close()
+    logger.setLevel(log_level)
+    logger.addHandler(file_handler)
     logger.addHandler(console_handler)
     return logger
 
@@ -551,12 +560,71 @@ def scan_notifications(config, logger, running: RunningNotifications) -> None:
     running.finish_scan()
 
 
-def run_monitor_loop(config, logger, dry_run=False, no_commit=False, force=False):
+def reload_monitor_config(
+    config: AttributeDict, config_path: Path, logger: logging.Logger,
+    logging_level: Optional[str] = None,
+) -> AttributeDict:
+    """Keep the working configuration if a reload or its runtime checks fail."""
+    try:
+        updated = read_config(config_path)
+        if logging_level is not None:
+            updated.log_level = logging_level
+        interval = updated.poll_interval
+        if (
+            isinstance(interval, bool) or not isinstance(interval, (int, float))
+            or not math.isfinite(interval) or interval <= 0
+        ):
+            raise ValueError("poll_interval must be a positive finite number")
+        hierarchy = updated.workchain_hierarchy
+        if not isinstance(hierarchy, dict):
+            raise ValueError("workchain_hierarchy must be a mapping")
+        for parent, children in hierarchy.items():
+            if not isinstance(parent, str) or not isinstance(children, dict):
+                raise ValueError("Invalid workchain hierarchy")
+            for child, calculations in children.items():
+                if (
+                    not isinstance(child, str) or not isinstance(calculations, list)
+                    or not all(isinstance(label, str) for label in calculations)
+                ):
+                    raise ValueError("Invalid workchain hierarchy")
+        get_time_bounds(updated)
+        get_allowed_element_counts(updated)
+        get_element_count_greater_than(updated)
+        get_allowed_compounds(updated)
+        get_element_filter(updated)
+        for key in ("webhook_url", "log_file", "log_level"):
+            if not isinstance(updated[key], str) or not updated[key].strip():
+                raise ValueError("Invalid string setting")
+        if updated.log_level.upper() not in ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"):
+            raise ValueError("Invalid log level")
+        for key in ("log_max_bytes", "log_backup_count"):
+            if type(updated[key]) is not int or updated[key] < 0:
+                raise ValueError("Invalid log rotation setting")
+        log_keys = ("log_file", "log_level", "log_max_bytes", "log_backup_count")
+        if any(updated.get(key) != config.get(key) for key in log_keys):
+            setup_logger(updated)
+        return updated
+    except Exception as exc:
+        # YAML parser errors may contain the line holding a credential.
+        logger.warning(
+            "Could not reload monitor configuration (%s); keeping previous settings",
+            type(exc).__name__,
+        )
+        return config
+
+
+def run_monitor_loop(
+    config, logger, dry_run=False, no_commit=False, force=False,
+    config_path: Optional[Path] = None, logging_level: Optional[str] = None,
+):
     """Run monitor scans continuously.
 
     ``force`` applies only to the first completed scan.  This makes
     ``--resend-all`` a one-shot replay instead of resending the same webhooks
     after every poll interval.
+
+    When ``config_path`` is provided, reload it before each scan. Preserve CLI
+    logging overrides and notification history across configuration changes.
     """
     notifier = None if dry_run else create_notifier(config)
     archive_errors = ArchiveUploadErrors() if notifier else None
@@ -573,11 +641,56 @@ def run_monitor_loop(config, logger, dry_run=False, no_commit=False, force=False
         logger.info("Long-running alerts disabled; scheduled statistics remain enabled")
     while True:
         try:
+            if config_path is not None:
+                previous = config
+                config = reload_monitor_config(config, config_path, logger, logging_level)
+                telegram_keys = (
+                    "telegram_bot_token", "telegram_chat_id",
+                    "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID",
+                )
+                if not dry_run and any(
+                    config.get(key) != previous.get(key) for key in telegram_keys
+                ):
+                    notifier = create_notifier(config)
+                running_keys = (
+                    "running_alert_hours", "notification_user_names", "notification_user_name",
+                )
+                if running is not None and any(
+                    config.get(key) != previous.get(key) for key in running_keys
+                ):
+                    running.configure(
+                        config.get("running_alert_hours"),
+                        config.get("notification_user_names"), config.get("notification_user_name"),
+                    )
+                schedule_keys = ("notification_time", "notification_timezone")
+                if reports is not None and any(
+                    config.get(key) != previous.get(key) for key in schedule_keys
+                ):
+                    reports.configure(
+                        config.get("notification_time", "09:00"),
+                        config.get("notification_timezone", "UTC"),
+                    )
+                if notifier is not None:
+                    if archive_errors is None:
+                        archive_errors = ArchiveUploadErrors()
+                    if running is None:
+                        running = RunningNotifications(
+                            notifier, config.get("running_alert_hours"), no_commit,
+                            user_names=config.get("notification_user_names"),
+                            user_name=config.get("notification_user_name"),
+                        )
+                    if reports is None:
+                        reports = DailyReports(
+                            notifier, config.get("notification_time", "09:00"),
+                            config.get("notification_timezone", "UTC"),
+                        )
+                    running.notifier = notifier
+                    reports.notifier = notifier
             if dry_run:
                 # In test mode, we emulate the behavior without sending
                 scan_and_process_dry_run(config, logger, force=force)
             else:
-                if running is not None:
+                if notifier is not None:
                     try:
                         running.begin_scan()
                         scan_notifications(config, logger, running)
@@ -591,7 +704,7 @@ def run_monitor_loop(config, logger, dry_run=False, no_commit=False, force=False
                         logger.warning("Notification scan failed; continuing MPDS monitoring")
                 scan_and_process(
                     config, logger, no_commit=no_commit, force=force,
-                    **({"archive_errors": archive_errors} if archive_errors is not None else {}),
+                    **({"archive_errors": archive_errors} if notifier is not None else {}),
                 )
 
             if force:
@@ -707,4 +820,6 @@ def main():
         dry_run=dry_run,
         no_commit=no_commit,
         force=force,
+        config_path=DEFAULT_CONFIG_PATH,
+        logging_level=config.log_level,
     )

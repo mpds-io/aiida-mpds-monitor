@@ -194,6 +194,17 @@ class RunningNotifications:
                  user_names: Optional[Mapping[str, str]] = None,
                  user_name: Optional[str] = None) -> None:
         self.notifier = notifier
+        self.configure(hours, user_names, user_name)
+        self.no_commit = no_commit
+        self._intervals: dict[str, dict] = {}
+        self._current: dict[str, tuple[bool, str]] = {}
+        self._next_current: Optional[dict[str, tuple[bool, str]]] = None
+
+    def configure(
+        self, hours: Optional[float] = None,
+        user_names: Optional[Mapping[str, str]] = None, user_name: Optional[str] = None,
+    ) -> None:
+        """Update reporting settings while retaining observed running intervals."""
         self.user_names = user_names if isinstance(user_names, Mapping) else {}
         self.user_name = user_name.strip() if isinstance(user_name, str) else ""
         # The singular setting is a default Telegram username for this monitor.
@@ -208,10 +219,6 @@ class RunningNotifications:
                 self.hours = value
             except (TypeError, ValueError):
                 logger.warning("running_alert_hours must be positive; RUNNING threshold disabled")
-        self.no_commit = no_commit
-        self._intervals: dict[str, dict] = {}
-        self._current: dict[str, tuple[bool, str]] = {}
-        self._next_current: Optional[dict[str, tuple[bool, str]]] = None
 
     def begin_scan(self) -> None:
         self._next_current = {}

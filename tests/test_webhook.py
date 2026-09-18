@@ -159,16 +159,22 @@ class TestSendArchive:
         assert errors.consume() == notice
 
     @patch("aiida_mpds_monitor.webhook.requests.post")
-    def test_notice_retained_if_upload_recovers_before_statistics(self, mock_post, tmp_path):
+    def test_notice_cleared_if_upload_recovers_before_statistics(self, mock_post, tmp_path):
         archive = tmp_path / "result.7z"
         archive.write_bytes(b"archive")
         errors = ArchiveUploadErrors()
         response = MagicMock(status_code=401)
         response.json.return_value = {"detail": "Token has expired"}
-        mock_post.side_effect = [response, MagicMock(status_code=200)]
+        new_failure = MagicMock(status_code=503)
+        new_failure.json.return_value = {"detail": "Service unavailable"}
+        mock_post.side_effect = [response, MagicMock(status_code=200), new_failure]
         assert not send_archive("https://example.com/upload", archive, errors=errors)
         assert send_archive("https://example.com/upload", archive, errors=errors)
-        assert "Token has expired" in errors.consume()
+        assert errors.consume() == ""
+        assert not send_archive("https://example.com/upload", archive, errors=errors)
+        notice = errors.consume()
+        assert "Service unavailable" in notice
+        assert "Token has expired" not in notice
         assert errors.consume() == ""
 
     @pytest.mark.parametrize("body", [None, [], {"detail": []}, "not JSON"])

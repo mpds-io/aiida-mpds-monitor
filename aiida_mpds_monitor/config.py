@@ -1,6 +1,7 @@
 
 import os
 from pathlib import Path
+from typing import Optional
 
 import yaml
 from aiida.common.extendeddicts import AttributeDict
@@ -53,6 +54,17 @@ def ensure_config_dir():
     return DEFAULT_CONFIG_PATH
 
 
+def read_config(config_path: Optional[Path] = None) -> AttributeDict:
+    """Read an existing configuration without creating or modifying files."""
+    with open(config_path or DEFAULT_CONFIG_PATH) as f:
+        user_config = yaml.safe_load(f)
+    if user_config is None:
+        user_config = {}
+    if not isinstance(user_config, dict):
+        raise ValueError("Configuration must be a YAML mapping")
+    return AttributeDict({**DEFAULT_CONFIG, **user_config})
+
+
 def load_config():
     config_path = ensure_config_dir()
 
@@ -62,12 +74,7 @@ def load_config():
             yaml.dump(DEFAULT_CONFIG, f, default_flow_style=False)
         config_path.chmod(0o644)
 
-    with open(config_path) as f:
-        user_config = yaml.safe_load(f) or {}
-
-    # Merging user config with defaults
-    final_config = {**DEFAULT_CONFIG, **user_config}
-    return AttributeDict(final_config)
+    return read_config(config_path)
 
 
 def get_auth_key(conf):

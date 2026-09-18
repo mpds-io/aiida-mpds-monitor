@@ -9,7 +9,7 @@ logger = logging.getLogger(__name__)
 
 
 class ArchiveUploadErrors:
-    """Queue one notice per failing endpoint until a successful upload resets it.
+    """Queue one notice per failing endpoint; successful uploads clear old notices.
 
     State belongs to one daemon run. Consume notices before attempting Telegram
     delivery so an ambiguous delivery failure cannot cause repeated alerts.
@@ -30,6 +30,7 @@ class ArchiveUploadErrors:
 
     def succeeded(self, url: str) -> None:
         self._failed.discard(url)
+        self._pending.pop(url, None)
 
     def consume(self) -> str:
         notices = list(self._pending.values())

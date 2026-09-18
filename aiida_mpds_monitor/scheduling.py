@@ -25,6 +25,10 @@ class DailyReports:
         self.notifier = notifier
         self._started = False
         self._last_daily_date: Optional[date] = None
+        self.configure(report_time, report_timezone)
+
+    def configure(self, report_time: str = "09:00", report_timezone: str = "UTC") -> None:
+        """Update the schedule without resetting startup or daily delivery history."""
         self._time: Optional[time] = None
         self._timezone = timezone.utc
         try:

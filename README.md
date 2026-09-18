@@ -119,10 +119,15 @@ then `security_key`. Archive authentication uses `MPDS_ARCHIVE_KEY`, then
 `archive_key`, then that webhook authentication key. Telegram settings use the
 environment variable, then the lowercase YAML key, then its uppercase YAML alias.
 
-Restart an already running monitor after changing YAML settings or environment
-variables. For environment changes, start it from a shell or service with the new
-values. If the upload server reports `Token has expired`, replace the archive
-token with a valid one before restarting.
+The daemon reloads `~/.aiida/aiida_mpds_monitor/conf.yaml` before each polling
+cycle. YAML changes take effect on the next cycle without a restart; existing
+running timers and daily report history are retained. If a reload fails, the
+monitor logs a warning and keeps its previous settings.
+
+To rotate an archive token while the monitor runs, update `archive_key` in YAML.
+This works when `MPDS_ARCHIVE_KEY` was not set at startup, since the environment
+value still takes priority. Changing environment variables requires restarting
+the monitor from a shell or service with the new values.
 
 ## Usage
 
@@ -340,8 +345,8 @@ as `"alice"` and adds `@` automatically. It applies to **every unmapped owner**
 in this monitor. Entries in the plural `notification_user_names` mapping take
 priority; keep using that mapping for profiles with multiple owners. Mapped
 values are used verbatim, so include `@` when specifying a Telegram username.
-Use the actual Telegram username, not just a profile display name. Restart the
-daemon after changing the configuration.
+Use the actual Telegram username, not just a profile display name. YAML edits
+take effect on the next polling cycle.
 
 If neither a mapping nor a default name is set, the report uses the owner's AiiDA
 first and last name, falling back to their email address. When several people submit under the
@@ -350,8 +355,8 @@ those people without separate ownership information.
 
 The uppercase YAML keys `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` are also
 accepted. For each setting, a nonempty environment value takes priority, followed
-by the lowercase YAML key, then the uppercase YAML key. Restart the daemon after
-editing the configuration. Restrict access to a file containing your token with
+by the lowercase YAML key, then the uppercase YAML key. YAML edits take effect
+on the next polling cycle. Restrict access to a file containing your token with
 `chmod 600 ~/.aiida/aiida_mpds_monitor/conf.yaml` and keep it out of version control.
 
 If neither setting is provided, notifications stay disabled. If only one is set,
@@ -392,8 +397,8 @@ the limit later wait until the next report.
 supported. Only durations **strictly greater** than the limit qualify. A missing
 or invalid limit disables long-running alerts; statistics remain enabled. An invalid
 limit logs a warning. Invalid time or timezone
-settings also disable reports with a warning. Restart the daemon after changing
-these settings.
+settings also disable reports with a warning. YAML changes apply on the next
+polling cycle and do not trigger an extra startup report.
 
 Daily checks are remembered in memory. The next scheduled check or startup can
 report calculations that are still overdue; crossing the limit does not trigger
@@ -441,7 +446,8 @@ cannot count as overdue. The `User` line appears when `notification_user_name`
 is configured. Counts are not combined across monitors sharing a chat.
 
 If an archive upload fails, the next scheduled statistics message includes a
-one-time notice with the HTTP status and server explanation, for example:
+one-time notice with the HTTP status and server explanation. A successful upload
+before that report cancels the pending notice. For example:
 
 ```text
 ⚠️ Archive upload errors

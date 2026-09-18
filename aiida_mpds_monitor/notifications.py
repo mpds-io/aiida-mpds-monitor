@@ -5,6 +5,7 @@ import os
 import time
 from abc import ABC, abstractmethod
 from typing import Mapping, Optional
+from urllib.parse import quote
 
 import requests
 from aiida.orm import ProcessNode
@@ -24,9 +25,36 @@ class Notifier(ABC):
 
 class TelegramNotifier(Notifier):
     def __init__(self, token: str, chat_id: str) -> None:
+        self._token = token
         self._url = f"https://api.telegram.org/bot{token}/sendMessage"
         self._chat_id = chat_id
         self._next_send_at = 0.0
+
+    def _safe_detail(self, value: object) -> str:
+        """Redact credentials before bounding and flattening external log text."""
+        detail = str(value)
+        for secret in (self._token, quote(self._token, safe="")):
+            if secret:
+                detail = detail.replace(secret, "[REDACTED]")
+        return " ".join(detail.split())[:500]
+
+    def _response_detail(self, status: int, data: Mapping) -> str:
+        details = [
+            f"chat_id={self._safe_detail(self._chat_id)}",
+            f"HTTP {status}",
+            f"error_code={self._safe_detail(data.get('error_code', 'unknown'))}",
+            f"description={self._safe_detail(data.get('description', 'not provided'))}",
+        ]
+        parameters = data.get("parameters")
+        if isinstance(parameters, Mapping):
+            if "retry_after" in parameters:
+                details.append(f"retry_after={self._safe_detail(parameters['retry_after'])}")
+            if "migrate_to_chat_id" in parameters:
+                details.append(
+                    "group migrated: update TELEGRAM_CHAT_ID (or telegram_chat_id in YAML) to "
+                    + self._safe_detail(parameters["migrate_to_chat_id"])
+                )
+        return "; ".join(details)
 
     def notify(self, message: str) -> None:
         # Use a conservative chunk size, including for non-BMP Unicode characters.
@@ -45,9 +73,28 @@ class TelegramNotifier(Notifier):
                     json={"chat_id": self._chat_id, "text": message},
                     timeout=10,
                 )
-                data = response.json()
+                try:
+                    data = response.json()
+                except ValueError:
+                    logger.error(
+                        "Telegram notification failed: chat_id=%s; HTTP %s; "
+                        "response is not valid JSON",
+                        self._safe_detail(self._chat_id), response.status_code,
+                    )
+                    return
+                if not isinstance(data, Mapping):
+                    logger.error(
+                        "Telegram notification failed: chat_id=%s; HTTP %s; "
+                        "expected a JSON object, received %s",
+                        self._safe_detail(self._chat_id), response.status_code,
+                        type(data).__name__,
+                    )
+                    return
                 if response.status_code == 429 or data.get("error_code") == 429:
-                    retry_after = (data.get("parameters") or {}).get("retry_after")
+                    parameters = data.get("parameters")
+                    retry_after = (
+                        parameters.get("retry_after") if isinstance(parameters, Mapping) else None
+                    )
                     if (
                         type(retry_after) is int
                         and 0 <= retry_after <= TELEGRAM_MAX_RETRY_AFTER
@@ -57,24 +104,43 @@ class TelegramNotifier(Notifier):
                             TELEGRAM_SEND_INTERVAL, retry_after
                         )
                         logger.warning(
-                            "Telegram rate limit reached; retrying rejected message in %s seconds",
+                            "Telegram rate limit reached; retrying rejected message in %s seconds; %s",
                             max(TELEGRAM_SEND_INTERVAL, retry_after),
+                            self._response_detail(response.status_code, data),
                         )
                         continue
                     logger.error(
                         "Telegram notification rejected by rate limit; "
-                        "retry limit reached or retry_after missing, invalid, or over %s seconds",
+                        "retry limit reached or retry_after missing, invalid, or over %s seconds; %s",
                         TELEGRAM_MAX_RETRY_AFTER,
+                        self._response_detail(response.status_code, data),
+                    )
+                    return
+                if response.status_code >= 400:
+                    logger.error(
+                        "Telegram notification rejected: %s",
+                        self._response_detail(response.status_code, data),
                     )
                     return
                 response.raise_for_status()
                 if data.get("ok") is not True:
-                    logger.error("Telegram notification rejected by API")
+                    logger.error(
+                        "Telegram notification rejected by API: %s",
+                        self._response_detail(response.status_code, data),
+                    )
                 return
-            except (requests.RequestException, ValueError, AttributeError, TypeError):
-                # Exceptions and API descriptions may contain the bot token.
+            except requests.RequestException as exc:
                 # Do not retry ambiguous failures: Telegram may have accepted the message.
-                logger.error("Telegram notification failed (HTTP, network, or invalid response)")
+                logger.error(
+                    "Telegram notification failed: chat_id=%s; %s: %s",
+                    self._safe_detail(self._chat_id), type(exc).__name__, self._safe_detail(exc),
+                )
+                return
+            except (ValueError, AttributeError, TypeError) as exc:
+                logger.error(
+                    "Telegram notification failed: chat_id=%s; invalid response (%s): %s",
+                    self._safe_detail(self._chat_id), type(exc).__name__, self._safe_detail(exc),
+                )
                 return
 
 

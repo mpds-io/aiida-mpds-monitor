@@ -63,7 +63,7 @@ def test_telegram_message_and_send():
         "Computer: cluster01\nState: excepted\nExit status: 401"
     )
     with patch("aiida_mpds_monitor.notifications.requests.post") as post:
-        post.return_value.json.return_value = {"ok": True}
+        post.return_value = telegram_response()
         TelegramNotifier("secret", "-123").notify(message)
     post.assert_called_once_with(
         "https://api.telegram.org/botsecret/sendMessage",
@@ -82,6 +82,7 @@ def test_missing_optional_fields():
 @pytest.mark.parametrize("failure", ["network", "http", "api", "json"])
 def test_telegram_failures_are_safe_and_redacted(failure, caplog):
     with patch("aiida_mpds_monitor.notifications.requests.post") as post:
+        post.return_value = telegram_response()
         if failure == "network":
             post.side_effect = requests.Timeout("secret")
         elif failure == "http":
@@ -95,6 +96,87 @@ def test_telegram_failures_are_safe_and_redacted(failure, caplog):
     assert "secret" not in caplog.text
     assert post.call_count == 1  # Never retry an ambiguous network/HTTP failure.
     assert caplog.records[-1].levelname == "ERROR"
+
+
+@pytest.mark.parametrize("status,code,description", [
+    (400, 400, "Bad Request: chat not found"),
+    (403, 403, "Forbidden: bot was kicked from the supergroup chat"),
+    (401, 401, "Unauthorized"),
+    (200, 400, "Bad Request: not enough rights to send text messages to the chat"),
+    (502, None, None),
+])
+def test_telegram_rejections_include_diagnostic_details(status, code, description, caplog):
+    data = {"ok": False}
+    if code is not None:
+        data.update(error_code=code, description=description)
+    with patch("aiida_mpds_monitor.notifications.requests.post") as post:
+        post.return_value = telegram_response(status, data)
+        TelegramNotifier("secret", "-123").notify("private message")
+    assert "chat_id=-123" in caplog.text
+    assert f"HTTP {status}" in caplog.text
+    assert f"error_code={code if code is not None else 'unknown'}" in caplog.text
+    assert (description or "description=not provided") in caplog.text
+    assert "secret" not in caplog.text
+    assert "private message" not in caplog.text
+    post.assert_called_once()
+
+
+def test_group_migration_error_shows_new_chat_id(caplog):
+    with patch("aiida_mpds_monitor.notifications.requests.post") as post:
+        post.return_value = telegram_response(400, {
+            "ok": False, "error_code": 400,
+            "description": "Bad Request: group chat was upgraded to a supergroup chat",
+            "parameters": {"migrate_to_chat_id": -1001234567890},
+        })
+        TelegramNotifier("secret", "-123").notify("test")
+    assert "update TELEGRAM_CHAT_ID" in caplog.text
+    assert "-1001234567890" in caplog.text
+    post.assert_called_once()
+
+
+@pytest.mark.parametrize("failure", ["api", "network"])
+def test_telegram_external_details_redact_raw_and_encoded_token(failure, caplog):
+    detail = (
+        "Cannot access https://api.telegram.org/bot123:secret/sendMessage "
+        "or bot123%3Asecret/sendMessage\nextra detail"
+    )
+    with patch("aiida_mpds_monitor.notifications.requests.post") as post:
+        if failure == "network":
+            post.side_effect = requests.ConnectionError(detail)
+        else:
+            post.return_value = telegram_response(403, {
+                "ok": False, "error_code": 403, "description": detail,
+            })
+        TelegramNotifier("123:secret", "-123").notify("test")
+    assert "Cannot access" in caplog.text
+    assert "[REDACTED]" in caplog.text
+    assert "secret" not in caplog.text
+    assert "\n" not in caplog.records[-1].message
+    if failure == "network":
+        assert "ConnectionError" in caplog.text
+
+
+@pytest.mark.parametrize("data", [None, [], "error", 42])
+def test_telegram_invalid_json_shape_logs_status(data, caplog):
+    with patch("aiida_mpds_monitor.notifications.requests.post") as post:
+        post.return_value = telegram_response(502)
+        post.return_value.json.return_value = data
+        TelegramNotifier("secret", "-123").notify("test")
+    assert "HTTP 502" in caplog.text
+    assert "expected a JSON object" in caplog.text
+    post.assert_called_once()
+
+
+def test_telegram_non_json_error_logs_http_status_without_body(caplog):
+    with patch("aiida_mpds_monitor.notifications.requests.post") as post:
+        post.return_value = telegram_response(502)
+        post.return_value.json.side_effect = ValueError("secret")
+        post.return_value.text = "private proxy error with secret"
+        TelegramNotifier("secret", "-123").notify("test")
+    assert "HTTP 502" in caplog.text
+    assert "response is not valid JSON" in caplog.text
+    assert "secret" not in caplog.text
+    post.assert_called_once()
 
 
 def test_message_spacing_is_preserved_between_details_and_summary(telegram_clock):

@@ -401,28 +401,14 @@ an immediate message during a polling cycle.
 
 ### Included calculations
 
-Reports select process types listed anywhere in `workchain_hierarchy`: parent
-keys, child keys, and calculation labels in the lists. The daemon queries
-`ProcessNode` directly for these types. It includes processes whose native AiiDA
-`process_state` is `running`, and calculations whose scheduler state is
-`running` while their AiiDA process remains active (`created`, `waiting`, or
-`running`). AiiDA normally uses `waiting` while a CalcJob executes remotely;
-the Telegram report presents this as the effective calculation state RUNNING.
-Call-link depth and the existence or state of parent nodes do not restrict the
-report. For example, a running `CrystalParallelCalculation` appears whenever
-that type is listed in the hierarchy and its running time exceeds the limit.
-Unlisted process types do not appear.
-Telegram reports ignore `monitor_filters` and MPDS delivery markers; normal
-MPDS webhook/archive filters remain unchanged.
+Reports cover running processes listed at any level of `workchain_hierarchy`
+in the monitor's AiiDA profile, including calculations executing remotely.
+Queued, completed, and unlisted processes are excluded. Telegram reports ignore
+`monitor_filters`.
 
-Each entry contains the owner's name, the node's PK, RUNNING duration, and its own
-`label.strip()`. For YaScheduler jobs, it also includes the assigned
-`node.hostname` from `yastatus --json` when that field is available. A node
-with an empty label remains in the report with
-`(label not set)` as its name. It does not expose the internal AiiDA `waiting`
-state for an executing scheduler job. Queued and terminal calculations are
-excluded. The daemon must use the same AiiDA profile as the calculations you
-want to inspect.
+Calculations exceeding `running_alert_hours` appear in the detailed report.
+Each entry shows the owner, calculation name, PK, running duration, and hostname
+when available. Empty labels appear as `(label not set)`.
 
 For example:
 
@@ -437,8 +423,8 @@ Hostname: compute-17
 Running time: at least 25 h 17 min
 ```
 
-At startup and each daily report time, the bot sends a statistics message from the
-completed scan. When there are overdue calculations, their details are sent first:
+At startup and each daily report time, the bot sends statistics after any overdue
+calculation details:
 
 ```text
 📊 Calculation statistics (this monitor)
@@ -448,14 +434,11 @@ RUNNING: 12
 Running longer than 24 h: 3
 ```
 
-The totals cover all RUNNING processes selected by this monitor's
-`workchain_hierarchy`, including those within the time limit. Processes with
-unknown duration count toward RUNNING but cannot count as over the limit.
-Queued and terminal processes are excluded. Counts are local to this monitor;
-they are not combined across machines sharing the chat. The `User` line appears
-when `notification_user_name` is configured. Statistics follow the startup/daily
-schedule even when there are no overdue or running calculations, or when
-`running_alert_hours` is disabled.
+Statistics count all running processes selected by this monitor, including those
+within the time limit. They still send when no calculations are running or
+long-running alerts are disabled. Unknown durations count toward RUNNING but
+cannot count as overdue. The `User` line appears when `notification_user_name`
+is configured. Counts are not combined across monitors sharing a chat.
 
 If an archive upload fails, the next scheduled statistics message includes a
 one-time notice with the HTTP status and server explanation, for example:
@@ -465,46 +448,18 @@ one-time notice with the HTTP status and server explanation, for example:
 Archive upload failed (HTTP 401): Token has expired
 ```
 
+`Allocated servers (YaScheduler)` counts enabled servers, both busy and idle.
+YaScheduler and its database dependency (`pg8000`) must be installed and
+configured in the monitor's environment. If the count cannot be retrieved, it
+shows `unavailable`; calculation reports still send. Monitors using the same
+YaScheduler database report the same server inventory, so do not add their
+server counts together.
 
-`Allocated servers (YaScheduler)` counts enabled records in `yascheduler_nodes`
-using the database connection settings loaded from the installed YaScheduler
-configuration API (`CONFIG_FILE`, including `YASCHEDULER_CONF_PATH` overrides).
-The monitor runs `SELECT COUNT(*) FROM yascheduler_nodes WHERE enabled=TRUE;`
-through `pg8000`, following the same database source as `yanodes`. It includes
-busy and idle servers across all cloud providers and static nodes; disabled
-records and pending disabled allocation placeholders are excluded. This count
-covers the scheduler's server inventory independently of `workchain_hierarchy`
-and calculation owners. It does not query the Hetzner Cloud API.
-Monitors connected to the same YaScheduler database report the same inventory;
-their server counts should not be added together.
-
-The database query runs only when sending statistics, with a 15-second connection
-socket timeout and a 15-second SQL statement timeout. Both legacy and current
-YaScheduler configuration APIs are supported. YaScheduler and its `pg8000`
-dependency must be installed in the monitor's Python environment. Configuration,
-connection, and query failures log an ERROR with the failed stage and exception
-type, and show `unavailable` rather than zero; calculation reports still send
-normally. Credentials and exception details are omitted from logs.
-
-The monitor uses the scheduler's `dispatch_time` when the scheduler plugin provides it.
-For YaScheduler, the monitor reads the RUNNING transition time from the task's
-`updated_at` value returned by `yastatus --json`. This allows existing jobs to
-show their elapsed execution time immediately after a monitor restart. The daemon
-looks for `yastatus` beside its Python executable, then on its service `PATH`.
-The command must have access to the YaScheduler configuration for these jobs.
-Its query has a 15-second timeout; failures log a warning and leave any available
-`dispatch_time` or fallback timer in use. Hostnames are omitted when unavailable.
-If the scheduler cannot provide a start timestamp, the monitor records its first
-RUNNING observation in the `monitor_running_interval` extra and reports a lower
-bound with **at least …**. The current message format uses this wording even
-when a scheduler timestamp is available. Normal restarts retain the fallback timer;
-`--no-commit` keeps it in memory only. Observing any other state resets the
-interval, as does switching between process-based and scheduler-based RUNNING
-detection without a scheduler timestamp. Node creation and modification times
-do not determine the duration. This measures scheduler execution time when
-available, not CPU usage.
-Calculations with an unavailable duration are omitted from scheduled reports
-because they cannot be confirmed over the limit.
+Running duration uses the scheduler's start time when available. Otherwise, it
+starts when the monitor first observes the calculation running. Reports show
+**at least …** because this may be a lower bound. Normal restarts retain the
+fallback timer; `--no-commit` loses it on restart. Calculations with an unknown
+duration are omitted from the overdue details.
 
 ### Delivery and failures
 

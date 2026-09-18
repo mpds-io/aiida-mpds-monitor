@@ -3,6 +3,7 @@ import logging.handlers
 import os
 import sys
 import time
+from typing import Optional
 
 from aiida import load_profile
 from aiida.orm import ProcessNode, QueryBuilder, WorkChainNode
@@ -32,7 +33,7 @@ from .status import (
     STATUS_WAITING,
     get_node_status,
 )
-from .webhook import send_webhook, send_archive
+from .webhook import ArchiveUploadErrors, send_webhook, send_archive
 
 
 def filter_nodes_by_element_count(
@@ -112,7 +113,9 @@ def setup_logger(config):
     return logger
 
 
-def generate_and_upload_archive(parent_node, base_nodes, config, logger) -> bool:
+def generate_and_upload_archive(
+    parent_node, base_nodes, config, logger, archive_errors: Optional[ArchiveUploadErrors] = None
+) -> bool:
     """Generate and upload one parent archive.
 
     A disabled archive upload is considered complete.  Otherwise ``True`` is
@@ -146,6 +149,7 @@ def generate_and_upload_archive(parent_node, base_nodes, config, logger) -> bool
             bid=config.get("archive_bid"),
             schema_id=config.get("archive_schema_id"),
             key=get_archive_key(config),
+            **({"errors": archive_errors} if archive_errors is not None else {}),
         )
     except Exception as exc:
         logger.exception(
@@ -229,7 +233,11 @@ def process_base_workchain(
     return True
 
 
-def scan_and_process(config, logger, no_commit=False, force=False):
+def scan_and_process(
+    config, logger, no_commit=False, force=False,
+    archive_errors: Optional[ArchiveUploadErrors] = None,
+):
+    archive_options = {"archive_errors": archive_errors} if archive_errors is not None else {}
     webhook_url = config.webhook_url
     webhook_key = get_auth_key(config)
     # Get parent workchain types from hierarchy keys
@@ -327,6 +335,7 @@ def scan_and_process(config, logger, no_commit=False, force=False):
                             base_nodes,
                             config,
                             logger,
+                            **archive_options,
                         )
                     if all_webhooks_sent and archive_uploaded and not no_commit:
                         parent_node.base.extras.set(EXTRA_ARCHIVE_PROCESSED, True)
@@ -398,6 +407,7 @@ def scan_and_process(config, logger, no_commit=False, force=False):
                 archive_base_nodes,
                 config,
                 logger,
+                **archive_options,
             )
 
         if processing_complete and archive_uploaded:
@@ -549,6 +559,7 @@ def run_monitor_loop(config, logger, dry_run=False, no_commit=False, force=False
     after every poll interval.
     """
     notifier = None if dry_run else create_notifier(config)
+    archive_errors = ArchiveUploadErrors() if notifier else None
     running = (RunningNotifications(
         notifier, config.get("running_alert_hours"), no_commit,
         user_names=config.get("notification_user_names"),
@@ -574,11 +585,14 @@ def run_monitor_loop(config, logger, dry_run=False, no_commit=False, force=False
                             running.overdue_report(),
                             summary=lambda: running.statistics_report(
                                 allocated_servers=resolve_allocated_servers(logger)
-                            ),
+                            ) + archive_errors.consume(),
                         )
                     except Exception:
                         logger.warning("Notification scan failed; continuing MPDS monitoring")
-                scan_and_process(config, logger, no_commit=no_commit, force=force)
+                scan_and_process(
+                    config, logger, no_commit=no_commit, force=force,
+                    **({"archive_errors": archive_errors} if archive_errors is not None else {}),
+                )
 
             if force:
                 force = False

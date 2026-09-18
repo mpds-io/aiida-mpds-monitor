@@ -1,6 +1,9 @@
 from unittest.mock import MagicMock, patch
 
-from aiida_mpds_monitor.webhook import send_archive, send_webhook
+import pytest
+import requests
+
+from aiida_mpds_monitor.webhook import ArchiveUploadErrors, send_archive, send_webhook
 
 
 class TestSendWebhook:
@@ -131,6 +134,86 @@ class TestSendWebhook:
 
 
 class TestSendArchive:
+    @patch("aiida_mpds_monitor.webhook.requests.post")
+    def test_expired_token_notice_once_until_upload_recovers(self, mock_post, tmp_path):
+        archive = tmp_path / "result.7z"
+        archive.write_bytes(b"archive")
+        errors = ArchiveUploadErrors()
+        response = MagicMock(status_code=401, text='{"detail":"Token has expired"}')
+        response.json.return_value = {"detail": "Token has expired"}
+        mock_post.return_value = response
+
+        for _ in range(3):
+            assert not send_archive("https://example.com/upload", archive, errors=errors)
+        notice = errors.consume()
+        assert notice.count("Token has expired") == 1
+        assert "HTTP 401" in notice
+        assert not send_archive("https://example.com/upload", archive, errors=errors)
+        assert errors.consume() == ""
+
+        mock_post.return_value = MagicMock(status_code=200)
+        assert send_archive("https://example.com/upload", archive, errors=errors)
+        assert errors.consume() == ""
+        mock_post.return_value = response
+        assert not send_archive("https://example.com/upload", archive, errors=errors)
+        assert errors.consume() == notice
+
+    @patch("aiida_mpds_monitor.webhook.requests.post")
+    def test_notice_retained_if_upload_recovers_before_statistics(self, mock_post, tmp_path):
+        archive = tmp_path / "result.7z"
+        archive.write_bytes(b"archive")
+        errors = ArchiveUploadErrors()
+        response = MagicMock(status_code=401)
+        response.json.return_value = {"detail": "Token has expired"}
+        mock_post.side_effect = [response, MagicMock(status_code=200)]
+        assert not send_archive("https://example.com/upload", archive, errors=errors)
+        assert send_archive("https://example.com/upload", archive, errors=errors)
+        assert "Token has expired" in errors.consume()
+        assert errors.consume() == ""
+
+    @pytest.mark.parametrize("body", [None, [], {"detail": []}, "not JSON"])
+    @patch("aiida_mpds_monitor.webhook.requests.post")
+    def test_unusable_error_body_still_reports_status(self, mock_post, body, tmp_path):
+        archive = tmp_path / "result.7z"
+        archive.write_bytes(b"archive")
+        errors = ArchiveUploadErrors()
+        response = MagicMock(status_code=502)
+        if body == "not JSON":
+            response.json.side_effect = ValueError("bad JSON")
+        else:
+            response.json.return_value = body
+        mock_post.return_value = response
+        assert not send_archive("https://example.com/upload", archive, errors=errors)
+        assert "HTTP 502" in errors.consume()
+
+    @patch("aiida_mpds_monitor.webhook.requests.post")
+    def test_error_notice_redacts_credentials_and_bounds_text(self, mock_post, tmp_path):
+        archive = tmp_path / "result.7z"
+        archive.write_bytes(b"archive")
+        errors = ArchiveUploadErrors()
+        mock_post.return_value = MagicMock(status_code=401)
+        mock_post.return_value.json.return_value = {
+            "detail": "Invalid secret:key / secret%3Akey\n" + "x" * 1000,
+        }
+        assert not send_archive(
+            "https://example.com/upload", archive, key="secret:key", errors=errors,
+        )
+        notice = errors.consume()
+        assert "secret" not in notice
+        assert "[REDACTED]" in notice
+        assert len(notice.splitlines()[-1]) == 500
+
+    @patch("aiida_mpds_monitor.webhook.requests.post")
+    def test_network_error_notice_is_safe_and_not_repeated(self, mock_post, tmp_path):
+        archive = tmp_path / "result.7z"
+        archive.write_bytes(b"archive")
+        errors = ArchiveUploadErrors()
+        mock_post.side_effect = requests.Timeout("secret")
+        assert not send_archive("https://example.com/upload", archive, errors=errors)
+        assert "Timeout" in errors.consume()
+        assert not send_archive("https://example.com/upload", archive, errors=errors)
+        assert errors.consume() == ""
+
     @patch("aiida_mpds_monitor.webhook.requests.post")
     def test_successful_multipart_upload(self, mock_post, tmp_path):
         archive = tmp_path / "BaMnO3.7z"

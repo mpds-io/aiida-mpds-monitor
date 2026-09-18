@@ -406,6 +406,15 @@ when `notification_user_name` is configured. Statistics follow the startup/daily
 schedule even when there are no overdue or running calculations, or when
 `running_alert_hours` is disabled.
 
+If an archive upload fails, the next scheduled statistics message includes a
+one-time notice with the HTTP status and server explanation, for example:
+
+```text
+⚠️ Archive upload errors
+Archive upload failed (HTTP 401): Token has expired
+```
+
+
 `Allocated servers (YaScheduler)` counts enabled records in `yascheduler_nodes`
 using the database connection settings loaded from the installed YaScheduler
 configuration API (`CONFIG_FILE`, including `YASCHEDULER_CONF_PATH` overrides).

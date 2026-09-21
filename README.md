@@ -434,7 +434,7 @@ calculation details:
 ```text
 📊 Calculation statistics (this monitor)
 User: @alice
-Allocated servers (YaScheduler): 5
+Allocated servers (yascheduler): 5
 RUNNING: 12
 Running longer than 24 h: 3
 ```
@@ -454,11 +454,11 @@ before that report cancels the pending notice. For example:
 Archive upload failed (HTTP 401): Token has expired
 ```
 
-`Allocated servers (YaScheduler)` counts enabled servers, both busy and idle.
-YaScheduler and its database dependency (`pg8000`) must be installed and
+`Allocated servers (yascheduler)` counts enabled servers, both busy and idle.
+yascheduler and its database dependency (`pg8000`) must be installed and
 configured in the monitor's environment. If the count cannot be retrieved, it
 shows `unavailable`; calculation reports still send. Monitors using the same
-YaScheduler database report the same server inventory, so do not add their
+yascheduler database report the same server inventory, so do not add their
 server counts together.
 
 Running duration uses the scheduler's start time when available. Otherwise, it

@@ -46,7 +46,7 @@ def test_empty_report_sends_statistics_alone_at_startup_and_daily():
 
 def test_statistics_query_runs_only_when_due_even_without_overdue_calculations():
     notifier = MagicMock()
-    summary = MagicMock(return_value="Allocated servers (YaScheduler): 5")
+    summary = MagicMock(return_value="Allocated servers (yascheduler): 5")
     reports = DailyReports(notifier)
     reports.notify_if_due(None, NOW, summary=summary)
     summary.assert_called_once_with()
@@ -56,7 +56,7 @@ def test_statistics_query_runs_only_when_due_even_without_overdue_calculations()
     reports.notify_if_due("duplicate", NOW + timedelta(hours=2), summary=summary)
     assert summary.call_count == 2
     assert [call.args[0] for call in notifier.notify.call_args_list] == [
-        "Allocated servers (YaScheduler): 5", "daily", "Allocated servers (YaScheduler): 5",
+        "Allocated servers (yascheduler): 5", "daily", "Allocated servers (yascheduler): 5",
     ]
 
 

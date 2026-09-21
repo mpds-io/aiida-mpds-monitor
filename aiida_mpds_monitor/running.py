@@ -44,7 +44,7 @@ def _yastatus_executable() -> str:
 
 
 def _yascheduler_db_config() -> Any:
-    """Load connection settings through the installed YaScheduler configuration API."""
+    """Load connection settings through the installed yascheduler configuration API."""
     try:
         config_module = import_module("yascheduler.config")
         paths = import_module("yascheduler.variables")
@@ -58,7 +58,7 @@ def _yascheduler_db_config() -> Any:
 
 
 def resolve_allocated_servers(logger_: logging.Logger = logger) -> Optional[int]:
-    """Count enabled servers directly in the configured YaScheduler database."""
+    """Count enabled servers directly in the configured yascheduler database."""
     connection = None
     cursor = None
     stage = "loading configuration"
@@ -85,7 +85,7 @@ def resolve_allocated_servers(logger_: logging.Logger = logger) -> Optional[int]
     except Exception as exc:
         # Connection/configuration errors may contain credentials; log only the type.
         logger_.error(
-            "Could not count YaScheduler servers while %s (%s)", stage, type(exc).__name__
+            "Could not count yascheduler servers while %s (%s)", stage, type(exc).__name__
         )
         return None
     finally:
@@ -95,7 +95,7 @@ def resolve_allocated_servers(logger_: logging.Logger = logger) -> Optional[int]
                     resource.close()
                 except Exception as exc:
                     logger_.error(
-                        "Could not close YaScheduler database resource (%s)", type(exc).__name__
+                        "Could not close yascheduler database resource (%s)", type(exc).__name__
                     )
 
 
@@ -134,7 +134,7 @@ def resolve_running_details(
         )
         if completed.returncode != 0:
             logger_.warning(
-                "YaScheduler timestamp query failed with exit code %s",
+                "yascheduler timestamp query failed with exit code %s",
                 completed.returncode,
             )
             return result
@@ -158,7 +158,7 @@ def resolve_running_details(
             )
     except (OSError, subprocess.SubprocessError, ValueError, TypeError) as exc:
         logger_.warning(
-            "Could not resolve YaScheduler RUNNING timestamps (%s)",
+            "Could not resolve yascheduler RUNNING timestamps (%s)",
             type(exc).__name__,
         )
     return result
@@ -354,7 +354,7 @@ class RunningNotifications:
         if self.user_name:
             lines.append(f"User: {self.user_name}")
         servers = allocated_servers if allocated_servers is not None else "unavailable"
-        lines.append(f"Allocated servers (YaScheduler): {servers}")
+        lines.append(f"Allocated servers (yascheduler): {servers}")
         lines.append(f"RUNNING: {len(entries)}")
         if self.hours is not None:
             lines.append(f"Running longer than {self.hours:g} h: {overdue_count}")

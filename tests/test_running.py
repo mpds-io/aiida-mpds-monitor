@@ -181,7 +181,7 @@ def test_loop_sends_only_overdue_calculations_to_shared_chat_and_continues_mpds(
     summary = post.call_args_list[1].kwargs["json"]
     assert summary["chat_id"] == "-123"
     expected_servers = server_count if server_count is not None else "unavailable"
-    assert f"Allocated servers (YaScheduler): {expected_servers}\n" in summary["text"]
+    assert f"Allocated servers (yascheduler): {expected_servers}\n" in summary["text"]
     server_query.assert_called_once()
     assert summary["text"].endswith("RUNNING: 2\nRunning longer than 2 h: 1")
 
@@ -242,7 +242,7 @@ def test_monitor_without_overdue_calculations_sends_statistics(hours, running_co
     notifier.notify.assert_called_once()
     message = notifier.notify.call_args.args[0]
     assert "Calculation statistics (this monitor)" in message
-    assert "Allocated servers (YaScheduler): 5" in message
+    assert "Allocated servers (yascheduler): 5" in message
     assert f"RUNNING: {running_count}\n" in message
     assert "LONG-RUNNING CALCULATION" not in message
     if hours is not None:
@@ -419,7 +419,7 @@ def test_statistics_count_running_and_overdue_once_from_completed_scan():
     tracker.finish_scan()
     expected = (
         "📊 Calculation statistics (this monitor)\nUser: @alice\n"
-        "Allocated servers (YaScheduler): unavailable\n"
+        "Allocated servers (yascheduler): unavailable\n"
         "RUNNING: 4\nRunning longer than 0.5 h: 2"
     )
     assert tracker.statistics_report() == expected
@@ -540,7 +540,7 @@ def test_allocated_servers_queries_enabled_inventory_and_closes(scheduler_db, co
     ]
     scheduler_db.cursor.close.assert_called_once_with()
     scheduler_db.connection.close.assert_called_once_with()
-    assert f"Allocated servers (YaScheduler): {count}\n" in (
+    assert f"Allocated servers (yascheduler): {count}\n" in (
         RunningNotifications(MagicMock()).statistics_report(count)
     )
 
@@ -556,7 +556,7 @@ def test_server_database_failure_is_unavailable_and_redacted(scheduler_db, stage
     }
     operations[stage].side_effect = RuntimeError("password=secret")
     assert resolve_allocated_servers() is None
-    assert "Could not count YaScheduler servers while" in caplog.text
+    assert "Could not count yascheduler servers while" in caplog.text
     assert "RuntimeError" in caplog.text
     assert "secret" not in caplog.text
     assert all(record.levelname == "ERROR" for record in caplog.records)
@@ -564,7 +564,7 @@ def test_server_database_failure_is_unavailable_and_redacted(scheduler_db, stage
         scheduler_db.connection.close.assert_called_once_with()
     if stage in ("query", "fetch"):
         scheduler_db.cursor.close.assert_called_once_with()
-    assert "Allocated servers (YaScheduler): unavailable" in (
+    assert "Allocated servers (yascheduler): unavailable" in (
         RunningNotifications(MagicMock()).statistics_report()
     )
 
@@ -581,7 +581,7 @@ def test_server_connection_is_closed_even_when_cursor_close_fails(scheduler_db, 
     scheduler_db.cursor.close.side_effect = RuntimeError("secret")
     assert resolve_allocated_servers() == 5
     scheduler_db.connection.close.assert_called_once_with()
-    assert "Could not close YaScheduler database resource" in caplog.text
+    assert "Could not close yascheduler database resource" in caplog.text
     assert "secret" not in caplog.text
 
 

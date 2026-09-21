@@ -1,13 +1,20 @@
 import logging
 import logging.handlers
+import math
 import os
 import sys
 import time
+from pathlib import Path
+from typing import Optional
 
 from aiida import load_profile
-from aiida.orm import QueryBuilder, WorkChainNode
+from aiida.common.extendeddicts import AttributeDict
+from aiida.orm import ProcessNode, QueryBuilder, WorkChainNode
 
-from .config import get_archive_key, get_auth_key, load_config, resolve_archive_upload_url
+from .config import (
+    DEFAULT_CONFIG_PATH, get_archive_key, get_auth_key, load_config, read_config,
+    resolve_archive_upload_url,
+)
 from .filters import (
     build_parent_query_filters,
     count_compound_elements,
@@ -19,6 +26,11 @@ from .filters import (
     matches_compound_filters,
 )
 from .generate_archive import generate_parent_archive
+from .notifications import create_notifier
+from .running import (
+    EXTRA_RUNNING, RunningNotifications, resolve_allocated_servers, resolve_running_details,
+)
+from .scheduling import DailyReports
 from .status import (
     base_has_ready_children,
     EXTRA_ARCHIVE_PROCESSED,
@@ -27,7 +39,7 @@ from .status import (
     STATUS_WAITING,
     get_node_status,
 )
-from .webhook import send_webhook, send_archive
+from .webhook import ArchiveUploadErrors, send_webhook, send_archive
 
 
 def filter_nodes_by_element_count(
@@ -83,11 +95,9 @@ def filter_nodes_by_element_count(
 
 def setup_logger(config):
     logger = logging.getLogger("aiida_mpds_monitor")
-    logger.setLevel(getattr(logging, config.log_level.upper()))
-    # Clear existing handlers
-    logger.handlers.clear()
+    log_level = getattr(logging, config.log_level.upper())
     # File handler with rotation
-    log_dir = os.path.dirname(config.log_file)
+    log_dir = os.path.dirname(config.log_file) or "."
     os.makedirs(log_dir, exist_ok=True)
     file_handler = logging.handlers.RotatingFileHandler(
         config.log_file,
@@ -99,15 +109,22 @@ def setup_logger(config):
         datefmt="%Y-%m-%d %H:%M:%S",
     )
     file_handler.setFormatter(file_formatter)
-    logger.addHandler(file_handler)
     # Console handler (optional, can be removed in production)
     console_handler = logging.StreamHandler(sys.stdout)
     console_handler.setFormatter(file_formatter)
+    # Construct the replacement before closing working handlers.
+    for handler in logger.handlers[:]:
+        logger.removeHandler(handler)
+        handler.close()
+    logger.setLevel(log_level)
+    logger.addHandler(file_handler)
     logger.addHandler(console_handler)
     return logger
 
 
-def generate_and_upload_archive(parent_node, base_nodes, config, logger) -> bool:
+def generate_and_upload_archive(
+    parent_node, base_nodes, config, logger, archive_errors: Optional[ArchiveUploadErrors] = None
+) -> bool:
     """Generate and upload one parent archive.
 
     A disabled archive upload is considered complete.  Otherwise ``True`` is
@@ -141,6 +158,7 @@ def generate_and_upload_archive(parent_node, base_nodes, config, logger) -> bool
             bid=config.get("archive_bid"),
             schema_id=config.get("archive_schema_id"),
             key=get_archive_key(config),
+            **({"errors": archive_errors} if archive_errors is not None else {}),
         )
     except Exception as exc:
         logger.exception(
@@ -224,7 +242,11 @@ def process_base_workchain(
     return True
 
 
-def scan_and_process(config, logger, no_commit=False, force=False):
+def scan_and_process(
+    config, logger, no_commit=False, force=False,
+    archive_errors: Optional[ArchiveUploadErrors] = None,
+):
+    archive_options = {"archive_errors": archive_errors} if archive_errors is not None else {}
     webhook_url = config.webhook_url
     webhook_key = get_auth_key(config)
     # Get parent workchain types from hierarchy keys
@@ -322,6 +344,7 @@ def scan_and_process(config, logger, no_commit=False, force=False):
                             base_nodes,
                             config,
                             logger,
+                            **archive_options,
                         )
                     if all_webhooks_sent and archive_uploaded and not no_commit:
                         parent_node.base.extras.set(EXTRA_ARCHIVE_PROCESSED, True)
@@ -393,6 +416,7 @@ def scan_and_process(config, logger, no_commit=False, force=False):
                 archive_base_nodes,
                 config,
                 logger,
+                **archive_options,
             )
 
         if processing_complete and archive_uploaded:
@@ -503,20 +527,185 @@ def scan_and_process_dry_run(config, logger, force=False):
         logger.info(f"[TEST] Would mark parent {parent_node.pk} as processed")
 
 
-def run_monitor_loop(config, logger, dry_run=False, no_commit=False, force=False):
+def scan_notifications(config, logger, running: RunningNotifications) -> None:
+    """Find configured process types directly, regardless of their call-link depth."""
+    hierarchy = config.get("workchain_hierarchy", {})
+    labels = set(hierarchy)
+    for children in hierarchy.values():
+        labels.update(children)
+        for calculations in children.values():
+            labels.update(calculations)
+    qb = QueryBuilder()
+    qb.append(ProcessNode, filters={"and": [
+        {"attributes.process_label": {"in": sorted(labels)}},
+        {"or": [
+            {"attributes.process_state": "running"},
+            {"and": [
+                {"attributes.process_state": {"in": ["created", "waiting", "running"]}},
+                {"attributes.scheduler_state": {"in": ["running", "RUNNING"]}},
+            ]},
+            # Revisit tracked nodes to reset intervals when they leave RUNNING.
+            {"extras": {"has_key": EXTRA_RUNNING}},
+        ]},
+    ]})
+    nodes = [node for (node,) in qb.iterall()]
+    running_details = resolve_running_details(nodes, logger)
+    for node in nodes:
+        details = running_details.get(node.uuid)
+        running.observe(
+            node,
+            running_since=details.running_since if details else None,
+            hostname=details.hostname if details else None,
+        )
+    running.finish_scan()
+
+
+def reload_monitor_config(
+    config: AttributeDict, config_path: Path, logger: logging.Logger,
+    logging_level: Optional[str] = None,
+) -> AttributeDict:
+    """Keep the working configuration if a reload or its runtime checks fail."""
+    try:
+        updated = read_config(config_path)
+        if logging_level is not None:
+            updated.log_level = logging_level
+        interval = updated.poll_interval
+        if (
+            isinstance(interval, bool) or not isinstance(interval, (int, float))
+            or not math.isfinite(interval) or interval <= 0
+        ):
+            raise ValueError("poll_interval must be a positive finite number")
+        hierarchy = updated.workchain_hierarchy
+        if not isinstance(hierarchy, dict):
+            raise ValueError("workchain_hierarchy must be a mapping")
+        for parent, children in hierarchy.items():
+            if not isinstance(parent, str) or not isinstance(children, dict):
+                raise ValueError("Invalid workchain hierarchy")
+            for child, calculations in children.items():
+                if (
+                    not isinstance(child, str) or not isinstance(calculations, list)
+                    or not all(isinstance(label, str) for label in calculations)
+                ):
+                    raise ValueError("Invalid workchain hierarchy")
+        get_time_bounds(updated)
+        get_allowed_element_counts(updated)
+        get_element_count_greater_than(updated)
+        get_allowed_compounds(updated)
+        get_element_filter(updated)
+        for key in ("webhook_url", "log_file", "log_level"):
+            if not isinstance(updated[key], str) or not updated[key].strip():
+                raise ValueError("Invalid string setting")
+        if updated.log_level.upper() not in ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"):
+            raise ValueError("Invalid log level")
+        for key in ("log_max_bytes", "log_backup_count"):
+            if type(updated[key]) is not int or updated[key] < 0:
+                raise ValueError("Invalid log rotation setting")
+        log_keys = ("log_file", "log_level", "log_max_bytes", "log_backup_count")
+        if any(updated.get(key) != config.get(key) for key in log_keys):
+            setup_logger(updated)
+        return updated
+    except Exception as exc:
+        # YAML parser errors may contain the line holding a credential.
+        logger.warning(
+            "Could not reload monitor configuration (%s); keeping previous settings",
+            type(exc).__name__,
+        )
+        return config
+
+
+def run_monitor_loop(
+    config, logger, dry_run=False, no_commit=False, force=False,
+    config_path: Optional[Path] = None, logging_level: Optional[str] = None,
+):
     """Run monitor scans continuously.
 
     ``force`` applies only to the first completed scan.  This makes
     ``--resend-all`` a one-shot replay instead of resending the same webhooks
     after every poll interval.
+
+    When ``config_path`` is provided, reload it before each scan. Preserve CLI
+    logging overrides and notification history across configuration changes.
     """
+    notifier = None if dry_run else create_notifier(config)
+    archive_errors = ArchiveUploadErrors() if notifier else None
+    running = (RunningNotifications(
+        notifier, config.get("running_alert_hours"), no_commit,
+        user_names=config.get("notification_user_names"),
+        user_name=config.get("notification_user_name"),
+    ) if notifier else None)
+    reports = (DailyReports(
+        notifier, config.get("notification_time", "09:00"),
+        config.get("notification_timezone", "UTC"),
+    ) if notifier else None)
+    if running is not None and running.hours is None:
+        logger.info("Long-running alerts disabled; scheduled statistics remain enabled")
     while True:
         try:
+            if config_path is not None:
+                previous = config
+                config = reload_monitor_config(config, config_path, logger, logging_level)
+                telegram_keys = (
+                    "telegram_bot_token", "telegram_chat_id",
+                    "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID",
+                )
+                if not dry_run and any(
+                    config.get(key) != previous.get(key) for key in telegram_keys
+                ):
+                    notifier = create_notifier(config)
+                running_keys = (
+                    "running_alert_hours", "notification_user_names", "notification_user_name",
+                )
+                if running is not None and any(
+                    config.get(key) != previous.get(key) for key in running_keys
+                ):
+                    running.configure(
+                        config.get("running_alert_hours"),
+                        config.get("notification_user_names"), config.get("notification_user_name"),
+                    )
+                schedule_keys = ("notification_time", "notification_timezone")
+                if reports is not None and any(
+                    config.get(key) != previous.get(key) for key in schedule_keys
+                ):
+                    reports.configure(
+                        config.get("notification_time", "09:00"),
+                        config.get("notification_timezone", "UTC"),
+                    )
+                if notifier is not None:
+                    if archive_errors is None:
+                        archive_errors = ArchiveUploadErrors()
+                    if running is None:
+                        running = RunningNotifications(
+                            notifier, config.get("running_alert_hours"), no_commit,
+                            user_names=config.get("notification_user_names"),
+                            user_name=config.get("notification_user_name"),
+                        )
+                    if reports is None:
+                        reports = DailyReports(
+                            notifier, config.get("notification_time", "09:00"),
+                            config.get("notification_timezone", "UTC"),
+                        )
+                    running.notifier = notifier
+                    reports.notifier = notifier
             if dry_run:
                 # In test mode, we emulate the behavior without sending
                 scan_and_process_dry_run(config, logger, force=force)
             else:
-                scan_and_process(config, logger, no_commit=no_commit, force=force)
+                if notifier is not None:
+                    try:
+                        running.begin_scan()
+                        scan_notifications(config, logger, running)
+                        reports.notify_if_due(
+                            running.overdue_report(),
+                            summary=lambda: running.statistics_report(
+                                allocated_servers=resolve_allocated_servers(logger)
+                            ) + archive_errors.consume(),
+                        )
+                    except Exception:
+                        logger.warning("Notification scan failed; continuing MPDS monitoring")
+                scan_and_process(
+                    config, logger, no_commit=no_commit, force=force,
+                    **({"archive_errors": archive_errors} if notifier is not None else {}),
+                )
 
             if force:
                 force = False
@@ -631,4 +820,6 @@ def main():
         dry_run=dry_run,
         no_commit=no_commit,
         force=force,
+        config_path=DEFAULT_CONFIG_PATH,
+        logging_level=config.log_level,
     )

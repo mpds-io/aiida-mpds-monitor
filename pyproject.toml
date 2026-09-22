@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "aiida-mpds-monitor"
-version = "0.11.0"
+version = "0.11.1"
 description = "AiiDA webhook monitor for MPDS workflows"
 readme = "README.md"
 license = "MIT"
@@ -49,6 +49,7 @@ exclude = ["openspec*", "node_modules*", "aiida_archives_tmp*"]
 [project.scripts]
 aiida-mpds-monitor = "aiida_mpds_monitor.daemon:main"
 aiida-mpds-submit = "aiida_mpds_monitor.submit:main"
+aiida-mpds-notify = "aiida_mpds_monitor.notify:main"
 aiida-mpds-stub = "aiida_mpds_monitor.stub_server:main"
 
 [tool.uv.sources]

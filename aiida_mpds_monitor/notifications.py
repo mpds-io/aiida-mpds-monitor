@@ -57,11 +57,20 @@ class TelegramNotifier(Notifier):
         return "; ".join(details)
 
     def notify(self, message: str) -> None:
+        self.send_message(message)
+
+    def send_message(self, message: str) -> bool:
+        """Send every chunk and report whether Telegram accepted them all."""
+        if not message:
+            return False
+        delivered = True
         # Use a conservative chunk size, including for non-BMP Unicode characters.
         for start in range(0, len(message), 2000):
-            self._send(message[start:start + 2000])
+            if not self._send(message[start:start + 2000]):
+                delivered = False
+        return delivered
 
-    def _send(self, message: str) -> None:
+    def _send(self, message: str) -> bool:
         for attempt in range(TELEGRAM_SEND_ATTEMPTS):
             try:
                 delay = self._next_send_at - time.monotonic()
@@ -81,7 +90,7 @@ class TelegramNotifier(Notifier):
                         "response is not valid JSON",
                         self._safe_detail(self._chat_id), response.status_code,
                     )
-                    return
+                    return False
                 if not isinstance(data, Mapping):
                     logger.error(
                         "Telegram notification failed: chat_id=%s; HTTP %s; "
@@ -89,7 +98,7 @@ class TelegramNotifier(Notifier):
                         self._safe_detail(self._chat_id), response.status_code,
                         type(data).__name__,
                     )
-                    return
+                    return False
                 if response.status_code == 429 or data.get("error_code") == 429:
                     parameters = data.get("parameters")
                     retry_after = (
@@ -115,36 +124,38 @@ class TelegramNotifier(Notifier):
                         TELEGRAM_MAX_RETRY_AFTER,
                         self._response_detail(response.status_code, data),
                     )
-                    return
+                    return False
                 if response.status_code >= 400:
                     logger.error(
                         "Telegram notification rejected: %s",
                         self._response_detail(response.status_code, data),
                     )
-                    return
+                    return False
                 response.raise_for_status()
                 if data.get("ok") is not True:
                     logger.error(
                         "Telegram notification rejected by API: %s",
                         self._response_detail(response.status_code, data),
                     )
-                return
+                    return False
+                return True
             except requests.RequestException as exc:
                 # Do not retry ambiguous failures: Telegram may have accepted the message.
                 logger.error(
                     "Telegram notification failed: chat_id=%s; %s: %s",
                     self._safe_detail(self._chat_id), type(exc).__name__, self._safe_detail(exc),
                 )
-                return
+                return False
             except (ValueError, AttributeError, TypeError) as exc:
                 logger.error(
                     "Telegram notification failed: chat_id=%s; invalid response (%s): %s",
                     self._safe_detail(self._chat_id), type(exc).__name__, self._safe_detail(exc),
                 )
-                return
+                return False
+        return False
 
 
-def create_notifier(config: Optional[Mapping] = None) -> Optional[Notifier]:
+def create_notifier(config: Optional[Mapping] = None) -> Optional[TelegramNotifier]:
     """Resolve Telegram settings from the environment, then YAML configuration."""
     config = config or {}
 

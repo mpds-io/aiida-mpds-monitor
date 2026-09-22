@@ -273,6 +273,22 @@ calculation entry identifies its owner, label, PK, execution hostname when
 available, and elapsed running time. Statistics include all RUNNING processes
 selected by this monitor, including those within the limit.
 
+To send a current calculation report to the group immediately, use:
+
+```bash
+aiida-mpds-notify
+```
+
+This one-shot command scans the current AiiDA profile and sends details for all
+running calculations, followed by the same statistics format as the daemon.
+Use `aiida-mpds-notify --overdue-only` to include calculation details only when
+they exceed `running_alert_hours`, like the scheduled report. Statistics are
+still sent even when no calculations qualify. The command uses the configured
+`workchain_hierarchy`, Telegram bot token, and chat ID; environment credentials
+take priority over YAML. `--config PATH` selects another config file. It does
+not send webhooks or archives, or change the daemon's report schedule. It
+returns a nonzero exit status if the scan or Telegram delivery fails.
+
 Reports are checked after the first successful scan at daemon startup and once
 a day at the configured time. If no calculations are over the limit, the bot
 sends the statistics message alone, including when RUNNING is zero. The monitor only

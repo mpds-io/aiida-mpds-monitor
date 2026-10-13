@@ -461,9 +461,10 @@ long-running alerts are disabled. Unknown durations count toward RUNNING but
 cannot count as overdue. The `User` line appears when `notification_user_name`
 is configured. Counts are not combined across monitors sharing a chat.
 
-If an archive upload fails, the next scheduled statistics message includes a
-one-time notice with the HTTP status and server explanation. A successful upload
-before that report cancels the pending notice. For example:
+If an archive upload fails, the next scheduled report sends a separate, one-time
+error message containing only the upload warning, HTTP status, and server
+explanation. The calculation and statistics messages stay separate. A successful
+upload before the report cancels the pending error message. For example:
 
 ```text
 ⚠️ Archive upload errors
@@ -486,8 +487,9 @@ duration are omitted from the overdue details.
 ### Delivery and failures
 
 Long reports are split into plain-text chunks of at most 2,000 characters;
-splitting can occur within a calculation entry. The final statistics follow the
-detail chunks. Send attempts from one monitor, including statistics and retries,
+splitting can occur within a calculation entry. Statistics follow the calculation
+details; any archive upload error follows as a separate message. Send attempts
+from one monitor, including statistics and retries,
 are spaced at least 3.1 seconds apart to stay below Telegram's
 [group sending limit](https://core.telegram.org/bots/faq#my-bot-is-hitting-limits-how-do-i-avoid-this).
 Separate instances sharing the bot do not coordinate their send timing.
@@ -504,8 +506,8 @@ The monitor attempts subsequent chunks and the final statistics even if an
 earlier chunk fails, so receiving statistics does not confirm delivery of all
 details. The scheduled slot is consumed regardless of delivery success; failed
 messages do not trigger another attempt on each poll. Errors are visible at the
-daemon's default WARNING logging level, and notification error messages omit
-the bot token and API response descriptions.
+daemon's default WARNING logging level. Notification errors redact the bot token
+while retaining Telegram's response description for diagnosis.
 
 Sending and retry waits run in the daemon loop before MPDS processing, so a
 large report can delay the next webhook/archive scan. Notification failures do

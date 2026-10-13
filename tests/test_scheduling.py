@@ -34,6 +34,24 @@ def test_statistics_are_sent_last_only_when_a_report_is_due():
     ]
 
 
+def test_archive_error_is_separate_and_only_consumed_when_report_is_due():
+    notifier = MagicMock()
+    pending = MagicMock(side_effect=[
+        "⚠️ Archive upload errors\nArchive upload failed (HTTP 401): Token has expired",
+        "",
+    ])
+    reports = DailyReports(notifier)
+    reports.notify_if_due(None, NOW, summary="startup statistics", error_report=pending)
+    reports.notify_if_due(None, NOW + timedelta(minutes=30), summary="not due", error_report=pending)
+    reports.notify_if_due(None, NOW + timedelta(hours=1), summary="daily statistics", error_report=pending)
+    assert pending.call_count == 2
+    assert [call.args[0] for call in notifier.notify.call_args_list] == [
+        "startup statistics",
+        "⚠️ Archive upload errors\nArchive upload failed (HTTP 401): Token has expired",
+        "daily statistics",
+    ]
+
+
 def test_empty_report_sends_statistics_alone_at_startup_and_daily():
     notifier = MagicMock()
     reports = DailyReports(notifier)

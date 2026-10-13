@@ -46,6 +46,7 @@ class DailyReports:
     def notify_if_due(
         self, report: Optional[str], now: Optional[datetime] = None,
         summary: Optional[Union[str, Callable[[], str]]] = None,
+        error_report: Optional[Union[str, Callable[[], str]]] = None,
     ) -> None:
         if self._time is None:
             return
@@ -69,3 +70,10 @@ class DailyReports:
                 self.notifier.notify(summary() if callable(summary) else summary)
         except Exception:
             logger.warning("Scheduled notification failed; continuing monitoring")
+        try:
+            if error_report:
+                error_message = error_report() if callable(error_report) else error_report
+                if error_message:
+                    self.notifier.notify(error_message)
+        except Exception:
+            logger.warning("Scheduled error notification failed; continuing monitoring")

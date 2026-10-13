@@ -10,10 +10,10 @@ from aiida_mpds_monitor.config import DEFAULT_CONFIG
 
 
 @pytest.mark.parametrize("telegram_fails", [False, True])
-def test_loop_includes_upload_error_in_statistics_once(telegram_fails, tmp_path):
+def test_loop_sends_upload_error_as_separate_message_once(telegram_fails, tmp_path):
     notifier = MagicMock()
     if telegram_fails:
-        notifier.notify.side_effect = [None, RuntimeError("delivery failure"), None]
+        notifier.notify.side_effect = [None, None, RuntimeError("delivery failure"), None]
     config = AttributeDict({**DEFAULT_CONFIG, "archive_keep": True})
     archive = tmp_path / "result.7z"
     archive.write_bytes(b"archive")
@@ -46,13 +46,14 @@ def test_loop_includes_upload_error_in_statistics_once(telegram_fails, tmp_path)
         clock.now.side_effect = [now, now + timedelta(days=1), now + timedelta(days=2)]
         daemon.run_monitor_loop(config, MagicMock())
 
-    summaries = [call.args[0] for call in notifier.notify.call_args_list]
-    assert len(summaries) == 3
-    assert all("📊 Calculation statistics" in summary for summary in summaries)
-    assert "Archive upload errors" not in summaries[0]
-    assert summaries[1].count("Token has expired") == 1
-    assert "HTTP 401" in summaries[1]
-    assert "Archive upload errors" not in summaries[2]
+    messages = [call.args[0] for call in notifier.notify.call_args_list]
+    assert len(messages) == 4
+    assert all("📊 Calculation statistics" in messages[index] for index in (0, 1, 3))
+    assert all("Archive upload errors" not in messages[index] for index in (0, 1, 3))
+    assert messages[2] == (
+        "⚠️ Archive upload errors\n"
+        "Archive upload failed (HTTP 401): Token has expired"
+    )
 
 
 def test_disabled_telegram_does_not_create_upload_error_tracker():

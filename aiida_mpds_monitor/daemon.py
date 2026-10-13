@@ -698,7 +698,8 @@ def run_monitor_loop(
                             running.overdue_report(),
                             summary=lambda: running.statistics_report(
                                 allocated_servers=resolve_allocated_servers(logger)
-                            ) + archive_errors.consume(),
+                            ),
+                            error_report=archive_errors.consume,
                         )
                     except Exception:
                         logger.warning("Notification scan failed; continuing MPDS monitoring")

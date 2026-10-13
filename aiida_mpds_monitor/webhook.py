@@ -37,7 +37,7 @@ class ArchiveUploadErrors:
         self._pending.clear()
         if not notices:
             return ""
-        return "\n\n⚠️ Archive upload errors\n" + "\n".join(notices)
+        return "⚠️ Archive upload errors\n" + "\n".join(notices)
 
 
 def send_webhook(webhook_url, payload, status, key=None):

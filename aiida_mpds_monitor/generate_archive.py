@@ -1,4 +1,5 @@
 import json
+import logging
 import re
 import shutil
 from pathlib import Path
@@ -10,6 +11,8 @@ from aiida.orm import CalcJobNode, load_node, WorkChainNode
 load_aiida_profile()
 
 from dft_organizer.archive import archive_and_save
+
+logger = logging.getLogger(__name__)
 
 LABEL_DICT = {
     "Elastic constants":"ELASTIC",
@@ -124,6 +127,41 @@ def _safe_dir_name(name: str) -> str:
     return str(name).strip().replace("/", "_")
 
 
+def _copy_calculation_input(
+    calculation: Any, destination: Path, retrieved_names: Iterable[str]
+) -> bool:
+    """Add the submitted input from the CalcJob repository as ``INPUT``.
+
+    Input files are stored on the CalcJob itself and need not be retrieved from
+    the remote computer. Prefer an INPUT already copied from retrieved data.
+    """
+    if "INPUT" in retrieved_names and (destination / "INPUT").is_file():
+        return True
+
+    try:
+        repository = calculation.base.repository
+        input_filename = calculation.get_option("input_filename") or "INPUT"
+        candidates = list(dict.fromkeys([input_filename, "INPUT"]))
+        for filename in candidates:
+            try:
+                with repository.open(filename, "rb") as source:
+                    contents = source.read()
+            except FileNotFoundError:
+                continue
+            (destination / "INPUT").write_bytes(contents)
+            return True
+        logger.warning(
+            "Archive generation skipped: no saved INPUT for %s",
+            _node_description(calculation),
+        )
+    except Exception as exc:
+        logger.warning(
+            "Archive generation skipped: could not copy INPUT for %s: %s",
+            _node_description(calculation), exc,
+        )
+    return False
+
+
 def _iter_called_descendants(nodes: Iterable[Any]) -> Iterable[Any]:
     """Yield all process nodes called below *nodes* in depth-first order."""
     roots = list(nodes)
@@ -165,7 +203,7 @@ def generate_archive(
     """
     Generate a 7z archive for the AiiDA calculation with given UUID.
 
-    Creates a temporary folder with the calculation's retrieved files and
+    Creates a temporary folder with the calculation's retrieved files, its saved INPUT and
     an ``INPUT.json`` (if requested and parameters exist), then compresses it using
     :func:`dft_organizer.core.archive_and_save`.
     """
@@ -201,6 +239,10 @@ def generate_archive(
                 shutil.copyfileobj(src, dst)
     except Exception as e:
         print(f"Error copying files for {uuid}: {e}")
+        return None
+
+    if not _copy_calculation_input(calc, calc_dir, names):
+        shutil.rmtree(calc_dir)
         return None
 
     # Write INPUT.json if parameters are present
@@ -344,6 +386,9 @@ def generate_parent_archive(
                         f"Warning: Could not copy {name} from {label_} "
                         f"{calculation.pk}: {e}"
                     )
+
+            if not _copy_calculation_input(calculation, calculation_dir, names):
+                return None
 
             try:
                 params = None

@@ -3,7 +3,9 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from aiida_mpds_monitor.generate_archive import generate_parent_archive
+import pytest
+
+from aiida_mpds_monitor.generate_archive import generate_archive, generate_parent_archive
 
 
 class DummyRetrievedFolder:
@@ -76,7 +78,7 @@ def test_generate_parent_archive_creates_named_root(mock_load_node, mock_archive
             label="OPTIMISE",
             pk=1,
             retrieved=_create_retrieved_folder(
-                Path(tmp_dir) / "opt_repo", {"OUTPUT": b"opt"}
+                Path(tmp_dir) / "opt_repo", {"OUTPUT": b"opt", "INPUT": b"opt input"}
             ),
         )
         grandchild_phon = DummyCalcJobNode(
@@ -84,7 +86,7 @@ def test_generate_parent_archive_creates_named_root(mock_load_node, mock_archive
             label="PHON",
             pk=2,
             retrieved=_create_retrieved_folder(
-                Path(tmp_dir) / "phon_repo", {"OUTPUT": b"phon"}
+                Path(tmp_dir) / "phon_repo", {"OUTPUT": b"phon", "INPUT": b"phon input"}
             ),
         )
         child = DummyProcessNode(
@@ -108,3 +110,132 @@ def test_generate_parent_archive_creates_named_root(mock_load_node, mock_archive
             expected_archive_root, aiida=True, skip_errors=True
         )
         assert not (tmp_root / parent_uuid).exists()
+
+
+@pytest.mark.parametrize("input_filename", ["INPUT", "main.d12"])
+@pytest.mark.parametrize(
+    "label, directory",
+    [
+        ("Geometry optimization", "STRUCT"),
+        ("Phonon frequencies", "PHONON"),
+        ("Elastic constants", "ELASTIC"),
+        ("STRUCT", "STRUCT"),
+        ("PHON", "PHON"),
+        ("ELAST", "ELAST"),
+    ],
+)
+def test_parent_archive_includes_submitted_input(tmp_path, input_filename, label, directory):
+    retrieved = _create_retrieved_folder(tmp_path / "outputs", {"OUTPUT": b"result"})
+    repository = _create_retrieved_folder(
+        tmp_path / "inputs", {input_filename: b"submitted input\n", "_aiidasubmit.sh": b"script"}
+    )
+    calc = DummyCalcJobNode(uuid="calc", label=label, retrieved=retrieved)
+    calc.base = SimpleNamespace(repository=repository)
+    calc.get_option = lambda name: input_filename
+    child = DummyProcessNode(uuid="child", called=[calc])
+    parent = DummyProcessNode(uuid="parent", label="NaCl", called=[child])
+
+    def inspect_archive(source_dir, **kwargs):
+        folder = source_dir / directory
+        assert (folder / "INPUT").read_bytes() == b"submitted input\n"
+        assert (folder / "OUTPUT").read_bytes() == b"result"
+        assert not (folder / "_aiidasubmit.sh").exists()
+        return _fake_archive_and_save(source_dir, **kwargs)
+
+    with patch("aiida_mpds_monitor.generate_archive.load_node", return_value=parent), patch(
+        "aiida_mpds_monitor.generate_archive.CalcJobNode", DummyCalcJobNode
+    ), patch("aiida_mpds_monitor.generate_archive.archive_and_save", side_effect=inspect_archive):
+        assert generate_parent_archive("parent", tmp_root=tmp_path / "tmp") is not None
+
+
+@pytest.mark.parametrize("retrieved_input", [False, True])
+def test_single_archive_preserves_retrieved_input(tmp_path, retrieved_input):
+    files = {"OUTPUT": b"result"}
+    if retrieved_input:
+        files["INPUT"] = b"retrieved input"
+    calc = DummyCalcJobNode(
+        uuid="calc", retrieved=_create_retrieved_folder(tmp_path / "outputs", files)
+    )
+    calc.base = SimpleNamespace(repository=_create_retrieved_folder(
+        tmp_path / "inputs", {"INPUT": b"submitted input"}
+    ))
+    calc.get_option = lambda name: "INPUT"
+
+    def inspect_archive(source_dir, **kwargs):
+        expected = b"retrieved input" if retrieved_input else b"submitted input"
+        assert (source_dir / "INPUT").read_bytes() == expected
+        return _fake_archive_and_save(source_dir, **kwargs)
+
+    with patch("aiida_mpds_monitor.generate_archive.load_node", return_value=calc), patch(
+        "aiida_mpds_monitor.generate_archive.archive_and_save", side_effect=inspect_archive
+    ):
+        assert generate_archive("calc", tmp_root=tmp_path / "tmp") is not None
+
+
+def test_archive_without_saved_input_is_skipped(tmp_path, caplog):
+    calc = DummyCalcJobNode(
+        uuid="calc",
+        retrieved=_create_retrieved_folder(tmp_path / "outputs", {"OUTPUT": b"result"}),
+    )
+    calc.base = SimpleNamespace(repository=_create_retrieved_folder(tmp_path / "inputs", {}))
+    calc.get_option = lambda name: "INPUT"
+    with patch("aiida_mpds_monitor.generate_archive.load_node", return_value=calc), patch(
+        "aiida_mpds_monitor.generate_archive.archive_and_save", side_effect=_fake_archive_and_save
+    ) as compress:
+        assert generate_archive("calc", tmp_root=tmp_path / "tmp") is None
+    compress.assert_not_called()
+    assert "no saved INPUT" in caplog.text
+    assert not (tmp_path / "tmp" / "calc").exists()
+
+
+@pytest.mark.parametrize("label", ["STRUCT", "PHON", "ELAST"])
+@pytest.mark.parametrize("retrieved_input", [False, True])
+def test_parent_archive_requires_input(tmp_path, caplog, label, retrieved_input):
+    files = {"OUTPUT": b"result"}
+    if retrieved_input:
+        files["INPUT"] = b"retrieved input"
+    calc = DummyCalcJobNode(
+        uuid="calc", label=label,
+        retrieved=_create_retrieved_folder(tmp_path / "outputs", files),
+    )
+    calc.base = SimpleNamespace(repository=_create_retrieved_folder(tmp_path / "inputs", {}))
+    calc.get_option = lambda name: "INPUT"
+    child = DummyProcessNode(uuid="child", called=[calc])
+    parent = DummyProcessNode(uuid="parent", label="NaCl", called=[child])
+
+    def inspect_archive(source_dir, **kwargs):
+        assert (source_dir / label / "INPUT").read_bytes() == b"retrieved input"
+        return _fake_archive_and_save(source_dir, **kwargs)
+
+    with patch("aiida_mpds_monitor.generate_archive.load_node", return_value=parent), patch(
+        "aiida_mpds_monitor.generate_archive.CalcJobNode", DummyCalcJobNode
+    ), patch(
+        "aiida_mpds_monitor.generate_archive.archive_and_save", side_effect=inspect_archive
+    ) as compress:
+        result = generate_parent_archive("parent", tmp_root=tmp_path / "tmp")
+
+    assert (result is not None) is retrieved_input
+    assert compress.call_count == int(retrieved_input)
+    assert not (tmp_path / "tmp" / "parent").exists()
+    if not retrieved_input:
+        assert "no saved INPUT" in caplog.text
+
+
+def test_single_archive_falls_back_to_repository_input(tmp_path):
+    calc = DummyCalcJobNode(
+        uuid="calc",
+        retrieved=_create_retrieved_folder(tmp_path / "outputs", {"OUTPUT": b"result"}),
+    )
+    calc.base = SimpleNamespace(repository=_create_retrieved_folder(
+        tmp_path / "inputs", {"INPUT": b"submitted input"}
+    ))
+    calc.get_option = lambda name: "missing.d12"
+
+    def inspect_archive(source_dir, **kwargs):
+        assert (source_dir / "INPUT").read_bytes() == b"submitted input"
+        return _fake_archive_and_save(source_dir, **kwargs)
+
+    with patch("aiida_mpds_monitor.generate_archive.load_node", return_value=calc), patch(
+        "aiida_mpds_monitor.generate_archive.archive_and_save", side_effect=inspect_archive
+    ):
+        assert generate_archive("calc", tmp_root=tmp_path / "tmp") is not None

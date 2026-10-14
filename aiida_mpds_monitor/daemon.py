@@ -617,11 +617,10 @@ def run_monitor_loop(
     config, logger, dry_run=False, no_commit=False, force=False,
     config_path: Optional[Path] = None, logging_level: Optional[str] = None,
 ):
-    """Run monitor scans continuously.
+    """Run monitor scans continuously, or scan once and exit when forced.
 
-    ``force`` applies only to the first completed scan.  This makes
-    ``--resend-all`` a one-shot replay instead of resending the same webhooks
-    after every poll interval.
+    ``force`` includes previously processed parents while respecting individual
+    delivery marks. A forced scan exits without polling again, even on error.
 
     When ``config_path`` is provided, reload it before each scan. Preserve CLI
     logging overrides and notification history across configuration changes.
@@ -709,15 +708,15 @@ def run_monitor_loop(
                 )
 
             if force:
-                force = False
-                logger.info(
-                    "Forced resend scan completed; continuing in normal monitor mode"
-                )
+                logger.info("Forced resend scan completed; exiting")
+                break
         except KeyboardInterrupt:
             logger.info("Shutting down gracefully...")
             break
         except Exception as e:
             logger.exception(f"Unexpected error: {e}")
+            if force:
+                raise
         time.sleep(config.poll_interval)
 
 
@@ -739,8 +738,8 @@ def main():
         "--resend-all",
         action="store_true",
         help=(
-            "Ignore existing extras/markers during the first scan and resend "
-            "webhooks for every eligible workchain."
+            "Scan all eligible parents once, including previously processed parents, "
+            "retry deliveries without success markers, then exit."
         ),
     )
     parser.add_argument(

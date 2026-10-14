@@ -234,8 +234,10 @@ Options:
 
 - `--dry-run`: Scan and log, skip sends and marks.
 - `--no-commit`: Send webhooks, skip setting AiiDA extras.
-- `--resend-all`: Ignore processed flags during the first scan and send every
-  eligible webhook once, then continue in normal monitoring mode.
+- `--resend-all`: Scan all eligible parents once, including previously processed
+  parents, then exit. Existing successful webhook and archive markers are
+  respected; only deliveries without success markers are retried. Configured
+  hierarchy and monitor filters still apply.
 - `--logging-level` / `-l`: Set verbosity (DEBUG through CRITICAL; defaults to ERROR).
 
 `--dry-run` and `--no-commit` are mutually exclusive; `--dry-run` wins.
@@ -515,7 +517,7 @@ not stop MPDS monitoring; each HTTP request uses a 10-second timeout.
 
 `--dry-run` sends no Telegram requests and writes no tracking extras.
 The one-shot `aiida-mpds-submit` command does not send Telegram messages.
-`--resend-all` replays eligible MPDS deliveries and does not override the Telegram
+`--resend-all` retries eligible MPDS deliveries once and exits. It does not override the Telegram
 schedule. `--no-commit` keeps fallback running timers in memory; restarting in
 this mode loses those timers unless the scheduler supplies a start timestamp.
 

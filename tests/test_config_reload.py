@@ -1,7 +1,7 @@
 import logging
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import ANY, MagicMock, patch
 
 import pytest
 import yaml
@@ -12,6 +12,43 @@ from aiida_mpds_monitor.config import read_config
 
 def write_config(path, **settings):
     path.write_text(yaml.safe_dump(settings))
+
+
+@pytest.mark.parametrize("dry_run,no_commit", [(False, False), (True, False), (False, True)])
+def test_resend_all_scans_once_and_exits_without_sleep(tmp_path, dry_run, no_commit):
+    path = tmp_path / "conf.yaml"
+    write_config(path)
+    config = read_config(path)
+    with patch.object(daemon, "create_notifier", return_value=None), patch.object(
+        daemon, "scan_and_process", side_effect=[None, AssertionError("Repeated scan")]
+    ) as scan, patch.object(
+        daemon, "scan_and_process_dry_run",
+        side_effect=[None, AssertionError("Repeated dry-run scan")],
+    ) as dry_scan, patch.object(daemon.time, "sleep") as sleep:
+        daemon.run_monitor_loop(
+            config, MagicMock(), force=True, dry_run=dry_run, no_commit=no_commit,
+            config_path=path,
+        )
+    if dry_run:
+        dry_scan.assert_called_once_with(config, ANY, force=True)
+        scan.assert_not_called()
+    else:
+        scan.assert_called_once_with(config, ANY, no_commit=no_commit, force=True)
+        dry_scan.assert_not_called()
+    sleep.assert_not_called()
+
+
+def test_resend_all_does_not_retry_unexpected_scan_errors(tmp_path):
+    path = tmp_path / "conf.yaml"
+    write_config(path)
+    config = read_config(path)
+    with patch.object(daemon, "create_notifier", return_value=None), patch.object(
+        daemon, "scan_and_process", side_effect=RuntimeError("Scan failed")
+    ) as scan, patch.object(daemon.time, "sleep") as sleep:
+        with pytest.raises(RuntimeError, match="Scan failed"):
+            daemon.run_monitor_loop(config, MagicMock(), force=True)
+    scan.assert_called_once()
+    sleep.assert_not_called()
 
 
 @pytest.mark.parametrize("contents", [

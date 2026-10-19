@@ -557,4 +557,97 @@ Set `true` to include structures only after all configured subcalculations succe
 
 Before creating the `.7z`, the monitor checks that the collected contents contain at least one non-empty calculation folder. With `send_archives_all_stages_ready: true`, every process below the selected base workchains must also have completed successfully (`is_finished_ok`). The number of calculation folders and their filenames are workflow-dependent. Failing an applicable check prevents archive creation and upload.
 
+### Check and repair CRYSTAL archives
+
+The daemon first uploads an archive without running the local CRYSTAL validator.
+Automatic recovery runs **only** if that request returns HTTP 422 with
+`Archive validation failed: Found not a finished output`. Other failures retain
+their existing retry behavior. Recovery uses `pycrystal` to check every `STRUCT`,
+`PHON`/`PHONON`, and `ELAST`/`ELASTIC` folder. Validation
+checks completion, parser errors, finite energies and atomic structures, MPDS
+input settings, saved `fort.34` structures when present, phonon modes and
+eigenvectors, thermodynamics, and elastic tensors. Chemical elements must agree
+with `STRUCT`; stage energies must differ from `STRUCT` by at most 0.01 eV, as
+required by the server parser.
+
+Invalid stages are recorded as `broken` or `corrupted` with reasons in a sibling
+`*.validation.json` report. Only confirmed output failures can change AiiDA
+process states: the archived `OUTPUT` SHA-256 must match the calculation's
+retrieved `OUTPUT`. Local I/O failures and unexpected parser errors abort recovery;
+input-policy or cross-stage consistency failures do not prove a process failed.
+The confirmed broken `CrystalParallelCalculation` nodes and their containing
+`BaseCrystalWorkChain` nodes are changed from falsely successful
+`finished` to AiiDA's existing `excepted` state, with an exception message.
+`mpds_archive_validation` extras record the reason and original state. The
+correction runs transactionally, preserves node sealing, and leaves retrieved
+files untouched. Other calculations and the top-level parent state are unchanged.
+Archive publication runs before that transaction commits; exceptions restore the
+previous archive and roll back node corrections. This compensates for ordinary
+failures, but is not a distributed transaction across the filesystem and database.
+
+Broken folders are removed from a temporary copy of the rejected archive. The
+daemon replaces the locally generated archive with the cleaned version and
+retries its upload once through the same endpoint and authentication flow.
+The recovery retry permits a partial archive even if initial generation required
+all stages. No repaired archive is uploaded without a valid `STRUCT`, or when
+no invalid folders can be mapped to the CRYSTAL calculation nodes. A second
+upload failure retains the cleaned archive for recovery and does not recurse.
+Successful recovery clears the queued upload error notice.
+The `mpds_archive_recovery` extra records a pending cleaned archive and its
+checksum. Later scans retry this file directly, including with strict stage
+readiness enabled, without re-validating or re-including the broken stages.
+The pending record is cleared after upload succeeds; changed or missing pending
+files are not uploaded automatically.
+
+Generated archives are stored at `archives/<parent UUID>/<material>.7z` relative
+to the generation output root, so equal labels do not overwrite another parent's
+archive. Cooperating local daemons use a per-parent POSIX file lock across
+generation, recovery, and upload. These locks do not coordinate different hosts
+or different working directories.
+
+Affected base webhook markers are reset so the normal next scan sends the
+corrected `excepted` statuses. Successful archive uploads retain their archive
+marker, avoiding another upload while those status updates are pending.
+`--no-commit` still permits archive repair and upload, but changes no AiiDA states
+or extras. `--dry-run` sends nothing and therefore never triggers recovery.
+This recovery is automatic in the monitor; the one-shot submit CLI does not
+perform it.
+
+To check or repair a directory or an existing archive independently of AiiDA:
+
+```bash
+# Check only: no files changed and no upload.
+python -m aiida_mpds_monitor.repair_crystal material.7z --dry-run
+
+# Build material.clean.7z and material.clean.validation.json locally.
+python -m aiida_mpds_monitor.repair_crystal material.7z
+
+# Repair and upload using archive_upload_url, archive_key, bid and schema_id from config.
+python -m aiida_mpds_monitor.repair_crystal /path/to/material \
+  --output /path/to/material.fixed.7z --upload --config /path/to/conf.yaml
+```
+
+After installing the updated package, `aiida-mpds-repair-crystal` provides the
+same command. A directory input must contain one material's stage folders;
+archives may have a wrapping material directory. Only validated stage folders
+are included in the standalone repaired archive, so stale summary files are not
+reused. The original directory/archive is preserved; folder deletion happens
+only in a temporary copy. Existing output files are not overwritten. A missing
+or invalid `STRUCT` produces a report but no archive or upload. Exit codes are
+0 for a successful check/build/upload, 1 for an operational error, 2 when no
+uploadable structure remains, and 3 for upload failure. Repaired archives and
+reports are retained after standalone uploads, including failed uploads.
+Archive extraction rejects traversal paths, duplicate member names, links, and
+special files before extraction. The default resource limits are 10,000 members
+and 20 GiB of unpacked data; callers can supply `ArchiveLimits` to adjust them.
+Outputs and JSON reports are published atomically; exclusive publication protects
+existing files even when another process creates them during compression.
+Directory dry runs validate in place without copying large wavefunctions.
+
+The standalone uploader uses the current upload API and does not delete remote
+archives or change AiiDA extras. Existing daemon delivery markers remain in
+effect; use this command to repair and re-upload an already marked archive.
+The standalone command sends nothing without `--upload`. The server decides whether an
+upload replaces an existing record or creates another one.
+
 Copyright © 2026 Materials Platform for Data Science OÜ

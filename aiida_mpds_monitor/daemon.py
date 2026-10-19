@@ -326,7 +326,11 @@ def scan_and_process(
     if not force:
         qb.add_filter("parent", {"extras": {"!has_key": EXTRA_PARENT_PROCESSED}})
 
-    for parent_node in qb.iterall():
+    # Exhaust the iterator before processing: iterall holds a storage transaction
+    # open, and archive generation/recovery may commit the shared session.
+    # Each parent's delivery marks must also survive a later parent's failure.
+    parent_rows = list(qb.iterall())
+    for parent_node in parent_rows:
         parent_node = parent_node[0]
         logger.debug(f"Processing parent workchain {parent_node.pk}")
         parent_is_broken = parent_node.is_failed or parent_node.is_excepted or parent_node.is_killed

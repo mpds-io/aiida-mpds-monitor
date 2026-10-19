@@ -6,6 +6,7 @@ STATUS_WAITING = "waiting"
 EXTRA_PARENT_PROCESSED = "webhook_parent_processed"
 EXTRA_INPROGRESS_SENT = "webhook_inprogress_sent"
 EXTRA_ARCHIVE_PROCESSED = "webhook_archive_processed"
+EXTRA_ARCHIVE_RECOVERY = "mpds_archive_recovery"
 
 
 def check_child_calculation(base_node, child_types=None, logger=None):

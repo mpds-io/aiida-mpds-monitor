@@ -152,7 +152,7 @@ def submit_parent(
         if archive_path:
             print(f"Parent archive successfully created: {archive_path}")
             try:
-                upload_url = resolve_archive_upload_url(config)
+                upload_url = resolve_archive_upload_url(config, logger=logging.getLogger(__name__))
                 bid = config.get("archive_bid", None)
                 schema_id = config.get("archive_schema_id", None)
                 if send_archive(upload_url, archive_path, bid=bid, schema_id=schema_id, key=get_archive_key(config)):

@@ -51,6 +51,7 @@ aiida-mpds-monitor = "aiida_mpds_monitor.daemon:main"
 aiida-mpds-submit = "aiida_mpds_monitor.submit:main"
 aiida-mpds-notify = "aiida_mpds_monitor.notify:main"
 aiida-mpds-stub = "aiida_mpds_monitor.stub_server:main"
+aiida-mpds-repair-crystal = "aiida_mpds_monitor.repair_crystal:main"
 
 [tool.uv.sources]
 dft-organizer = { git = "https://github.com/mpds-io/dft_organizer.git" }

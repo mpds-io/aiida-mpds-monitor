@@ -207,6 +207,8 @@ marimo/_lsp/
 __marimo__/
 
 # opencode
+/archives/
+/aiida_archives_tmp/
 .opencode/
 node_modules
 # openspec/

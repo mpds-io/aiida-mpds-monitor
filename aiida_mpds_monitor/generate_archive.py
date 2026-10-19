@@ -3,7 +3,7 @@ import logging
 import re
 import shutil
 from pathlib import Path
-from typing import Any, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional
 
 from aiida import load_profile as load_aiida_profile
 from aiida.orm import CalcJobNode, load_node, WorkChainNode
@@ -124,7 +124,10 @@ def _finalize_archive(source_dir: Path, dest_path: Path) -> Optional[Path]:
 
 def _safe_dir_name(name: str) -> str:
     """Create a filesystem-safe directory name from a node label."""
-    return str(name).strip().replace("/", "_")
+    result = str(name).strip().replace("/", "_").replace("\\", "_")
+    if result in ("", ".", ".."):
+        raise ValueError("Calculation directory name must not be empty or a traversal component")
+    return result
 
 
 def _copy_calculation_input(
@@ -295,6 +298,7 @@ def generate_parent_archive(
     tmp_root: Optional[Path] = None,
     require_all_subnodes: bool = True,
     save_input_json: bool = False,
+    stage_nodes: Optional[Dict[str, Any]] = None,
 ) -> Optional[Path]:
     """
     Generate a 7z archive for the parent WorkChain with subdirectories for each
@@ -343,10 +347,17 @@ def generate_parent_archive(
 
     try:
         # Traverse every nested workflow and collect retrieved data from CalcJobs.
-        for calculation in _iter_called_descendants(base_nodes):
+        for calculation in sorted(
+            _iter_called_descendants(base_nodes), key=lambda node: getattr(node, "pk", None) or 0
+        ):
             if not isinstance(calculation, CalcJobNode):
                 continue
 
+            process_label = getattr(calculation, "process_label", "")
+            is_crystal_calculation = (
+                isinstance(process_label, str) and process_label.startswith("Crystal")
+                and process_label.endswith("Calculation")
+            )
             if (
                 not require_all_subnodes
                 and getattr(calculation, "is_finished_ok", False) is not True
@@ -375,7 +386,12 @@ def generate_parent_archive(
                 continue
 
             calculation_dir = archive_root / label_str
+            if is_crystal_calculation and calculation_dir.exists():
+                # A retry must not inherit missing/corrupted files from an older attempt.
+                shutil.rmtree(calculation_dir)
             calculation_dir.mkdir(parents=True, exist_ok=True)
+            if stage_nodes is not None:
+                stage_nodes[label_str] = calculation
             for name in names:
                 try:
                     with repo_folder.open(name, "rb") as src:
@@ -407,12 +423,13 @@ def generate_parent_archive(
                     f"{calculation.pk}: {e}"
                 )
 
+        if archive_path is None:
+            # Equal material labels in different parents must not share a local archive.
+            archive_path = tmp_root.parent / "archives" / _safe_dir_name(parent_uuid) / f"{parent_dir_name}.7z"
+        archive_path = Path(archive_path)
+
         if not validate_archive_contents(archive_root):
             return None
-
-        if archive_path is None:
-            archive_path = tmp_root.parent / f"{parent_dir_name}.7z"
-        archive_path = Path(archive_path)
 
         # archive_and_save creates {archive_root}.7z next to archive_root
         _ = archive_and_save(archive_root, aiida=True, skip_errors=True)

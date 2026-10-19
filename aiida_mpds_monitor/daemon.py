@@ -15,6 +15,7 @@ from .config import (
     DEFAULT_CONFIG_PATH, get_archive_key, get_auth_key, load_config, read_config,
     resolve_archive_upload_url,
 )
+from .archive_files import parent_archive_lock
 from .filters import (
     build_parent_query_filters,
     count_compound_elements,
@@ -34,12 +35,13 @@ from .scheduling import DailyReports
 from .status import (
     base_has_ready_children,
     EXTRA_ARCHIVE_PROCESSED,
+    EXTRA_ARCHIVE_RECOVERY,
     EXTRA_INPROGRESS_SENT,
     EXTRA_PARENT_PROCESSED,
     STATUS_WAITING,
     get_node_status,
 )
-from .webhook import ArchiveUploadErrors, send_webhook, send_archive
+from .webhook import ArchiveUploadErrors, ArchiveUploadResult, send_webhook, send_archive
 
 
 def filter_nodes_by_element_count(
@@ -123,7 +125,8 @@ def setup_logger(config):
 
 
 def generate_and_upload_archive(
-    parent_node, base_nodes, config, logger, archive_errors: Optional[ArchiveUploadErrors] = None
+    parent_node, base_nodes, config, logger, archive_errors: Optional[ArchiveUploadErrors] = None,
+    no_commit: bool = False,
 ) -> bool:
     """Generate and upload one parent archive.
 
@@ -133,12 +136,39 @@ def generate_and_upload_archive(
     if not config.get("send_archive", True):
         return True
 
-    try:
-        archive_path = generate_parent_archive(
-            parent_node.uuid,
-            base_nodes=base_nodes,
-            require_all_subnodes=config.get("send_archives_all_stages_ready", False),
+    with parent_archive_lock(parent_node.uuid) as acquired:
+        if not acquired:
+            logger.info("Parent %s is already being uploaded by another monitor", parent_node.pk)
+            return False
+        return _generate_and_upload_archive(
+            parent_node, base_nodes, config, logger, archive_errors, no_commit,
         )
+
+
+def _generate_and_upload_archive(
+    parent_node, base_nodes, config, logger, archive_errors=None, no_commit=False,
+) -> bool:
+    """The caller holds the per-parent lock through generation, recovery, and upload."""
+
+    stage_nodes = {}
+    using_recovered = False
+    try:
+        pending = (
+            parent_node.base.extras.get(EXTRA_ARCHIVE_RECOVERY, None)
+            if hasattr(parent_node, "base") else None
+        )
+        using_recovered = isinstance(pending, dict) and pending.get("status") == "ready"
+        if using_recovered:
+            from .crystal_recovery import pending_recovered_archive
+
+            archive_path = pending_recovered_archive(parent_node)
+        else:
+            archive_path = generate_parent_archive(
+                parent_node.uuid,
+                base_nodes=base_nodes,
+                require_all_subnodes=config.get("send_archives_all_stages_ready", False),
+                stage_nodes=stage_nodes,
+            )
     except Exception as exc:
         logger.exception(
             f"Error generating archive for parent {parent_node.pk}: {exc}"
@@ -152,14 +182,30 @@ def generate_and_upload_archive(
     logger.info(f"Generated archive for parent {parent_node.pk}: {archive_path}")
     try:
         upload_url = resolve_archive_upload_url(config, logger=logger)
+        result = ArchiveUploadResult()
         uploaded = send_archive(
             upload_url,
             archive_path,
             bid=config.get("archive_bid"),
             schema_id=config.get("archive_schema_id"),
             key=get_archive_key(config),
+            result=result,
             **({"errors": archive_errors} if archive_errors is not None else {}),
         )
+        if not uploaded and result.unfinished_crystal_output and not using_recovered:
+            from .crystal_recovery import recover_archive
+
+            logger.warning("Server rejected unfinished CRYSTAL output; checking parent %s", parent_node.pk)
+            repaired = recover_archive(
+                parent_node, base_nodes, archive_path, stage_nodes, no_commit=no_commit,
+            )
+            if repaired is not None:
+                # One immediate retry. A second rejection must not recurse.
+                uploaded = send_archive(
+                    upload_url, repaired, bid=config.get("archive_bid"),
+                    schema_id=config.get("archive_schema_id"), key=get_archive_key(config),
+                    **({"errors": archive_errors} if archive_errors is not None else {}),
+                )
     except Exception as exc:
         logger.exception(
             f"Error uploading archive for parent {parent_node.pk}: {exc}"
@@ -174,6 +220,14 @@ def generate_and_upload_archive(
         return False
 
     logger.info(f"Uploaded archive for parent {parent_node.pk} to {upload_url}")
+    if not no_commit and hasattr(parent_node, "base"):
+        recovery = parent_node.base.extras.get(EXTRA_ARCHIVE_RECOVERY, None)
+        if isinstance(recovery, dict) and recovery.get("status") == "ready":
+            parent_node.base.extras.set(EXTRA_ARCHIVE_PROCESSED, True)
+            parent_node.base.extras.delete(EXTRA_ARCHIVE_RECOVERY)
+    if no_commit and using_recovered:
+        logger.info("Kept pending recovered archive because --no-commit preserves its AiiDA record")
+        return True
     if config.get("archive_keep", False):
         logger.info(f"Kept archive {archive_path} (archive_keep=true)")
         return True
@@ -247,6 +301,8 @@ def scan_and_process(
     archive_errors: Optional[ArchiveUploadErrors] = None,
 ):
     archive_options = {"archive_errors": archive_errors} if archive_errors is not None else {}
+    if no_commit:
+        archive_options["no_commit"] = True
     webhook_url = config.webhook_url
     webhook_key = get_auth_key(config)
     # Get parent workchain types from hierarchy keys
@@ -348,7 +404,11 @@ def scan_and_process(
                         )
                     if all_webhooks_sent and archive_uploaded and not no_commit:
                         parent_node.base.extras.set(EXTRA_ARCHIVE_PROCESSED, True)
-                        parent_node.base.extras.set(EXTRA_PARENT_PROCESSED, True)
+                        if all(
+                            base.base.extras.get(EXTRA_PARENT_PROCESSED, False)
+                            for base in base_nodes if base.label and base.label.strip()
+                        ):
+                            parent_node.base.extras.set(EXTRA_PARENT_PROCESSED, True)
                 elif not base_candidates:
                     # Parent failed before spawning any children — report using parent's own label
                     webhook_sent = parent_node.base.extras.get(
@@ -410,7 +470,9 @@ def scan_and_process(
         archive_uploaded = parent_node.base.extras.get(
             EXTRA_ARCHIVE_PROCESSED, False
         )
-        if processing_complete and archive_ready and not archive_uploaded:
+        recovery = parent_node.base.extras.get(EXTRA_ARCHIVE_RECOVERY, {})
+        recovery_pending = isinstance(recovery, dict) and recovery.get("status") == "ready"
+        if processing_complete and (archive_ready or recovery_pending) and not archive_uploaded:
             archive_uploaded = generate_and_upload_archive(
                 parent_node,
                 archive_base_nodes,
@@ -422,8 +484,12 @@ def scan_and_process(
         if processing_complete and archive_uploaded:
             if not no_commit:
                 parent_node.base.extras.set(EXTRA_ARCHIVE_PROCESSED, True)
-                parent_node.base.extras.set(EXTRA_PARENT_PROCESSED, True)
-                logger.info(f"Parent {parent_node.pk} marked as processed")
+                if all(
+                    base.base.extras.get(EXTRA_PARENT_PROCESSED, False)
+                    for base in base_nodes if base.label and base.label.strip()
+                ):
+                    parent_node.base.extras.set(EXTRA_PARENT_PROCESSED, True)
+                    logger.info(f"Parent {parent_node.pk} marked as processed")
         else:
             logger.debug(
                 f"Parent {parent_node.pk} remains pending: "

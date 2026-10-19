@@ -18,13 +18,14 @@ DETAIL = "Archive validation failed: Found not a finished output"
 
 
 @pytest.mark.parametrize("no_commit", [False, True])
-def test_standard_aiida_exception_state_preserves_sealing_and_original_state(nodes, no_commit):
+def test_validation_flags_preserve_process_state_and_sealing(nodes, no_commit):
     parent, base, good, bad = nodes
     original_extras = dict(bad.base.extras.all)
     crystal_recovery.mark_broken_processes(parent, [(bad, base, "PHON: unfinished")], no_commit)
     for node in (base, bad):
-        assert node.is_excepted is (not no_commit)
-        assert node.is_finished_ok is no_commit
+        assert not node.is_excepted
+        assert node.is_finished_ok
+        assert node.exception is None
         assert node.is_sealed
     assert good.is_finished_ok
     assert parent.is_finished_ok
@@ -33,7 +34,9 @@ def test_standard_aiida_exception_state_preserves_sealing_and_original_state(nod
         assert bad.base.extras.all == original_extras
     else:
         assert get_node_status(base) == "excepted"
-        assert "PHON: unfinished" in bad.exception
+        assert "PHON: unfinished" in bad.base.extras.get(crystal_recovery.EXTRA_VALIDATION)["reason"]
+        assert bad.base.extras.get(crystal_recovery.EXTRA_VALIDATION)["exclude_from_archive"]
+        assert not base.base.extras.get(crystal_recovery.EXTRA_VALIDATION)["exclude_from_archive"]
         assert bad.base.extras.get(crystal_recovery.EXTRA_VALIDATION)["original"]["process_state"] == "finished"
         assert EXTRA_PARENT_PROCESSED not in parent.base.extras.all
         assert not base.base.extras.get(EXTRA_PARENT_PROCESSED)
@@ -43,7 +46,7 @@ def test_standard_aiida_exception_state_preserves_sealing_and_original_state(nod
 def test_failed_state_correction_rolls_back_all_processes(nodes):
     parent, base, _, bad = nodes
     original_extras = dict(bad.base.extras.all)
-    with patch.object(base, "set_process_state", side_effect=RuntimeError("storage failure")):
+    with patch.object(type(base.base.extras), "set", side_effect=RuntimeError("storage failure")):
         with pytest.raises(RuntimeError, match="storage failure"):
             crystal_recovery.mark_broken_processes(parent, [(bad, base, "bad output")])
     assert bad.is_finished_ok and base.is_finished_ok
@@ -125,7 +128,8 @@ def test_422_recovery_marks_real_nodes_and_retries_clean_archive_once(
         assert options["headers"] == {"Authorization": "Bearer test-key"}
         assert options["data"] == {"bid": "2", "schema_id": "3"}
         if calls == 2:
-            assert bad.is_excepted is (not no_commit)
+            assert bad.is_finished_ok
+            assert (crystal_recovery.EXTRA_VALIDATION in bad.base.extras.all) is (not no_commit)
         response = MagicMock(status_code=422 if calls == 1 else retry_status)
         response.json.return_value = {"detail": DETAIL}
         return response
@@ -202,7 +206,8 @@ def test_unrepairable_struct_is_marked_broken_but_not_reuploaded(tmp_path, monke
     assert crystal_recovery.recover_archive(
         parent, [base], archive, {"STRUCT": bad, "PHON": good},
     ) is None
-    assert bad.is_excepted and base.is_excepted
+    assert bad.is_finished_ok and base.is_finished_ok
+    assert bad.base.extras.get(crystal_recovery.EXTRA_VALIDATION)["status"] == "broken"
     assert good.is_finished_ok
     assert archive.read_bytes() == original
     assert archive.with_suffix(".validation.json").exists()
@@ -222,3 +227,53 @@ def test_unmapped_invalid_stage_cannot_change_states(tmp_path, monkeypatch, node
     monkeypatch.setattr("aiida_mpds_monitor.crystal_validation.CRYSTOUT", parser)
     assert crystal_recovery.recover_archive(parent, [base], archive, {"STRUCT": good}) is None
     assert bad.is_finished_ok and base.is_finished_ok
+
+
+@pytest.mark.parametrize("strict", [False, True])
+def test_future_rebuild_excludes_flagged_calculation(nodes, tmp_path, strict):
+    from aiida_mpds_monitor import generate_archive as archives
+    from aiida_mpds_monitor.status import base_has_ready_children
+
+    parent, base, good, bad = nodes
+    good.label = "Geometry optimization"
+    bad.label = "Phonon frequencies"
+    crystal_recovery.mark_broken_processes(parent, [(bad, base, "PHON: unfinished")])
+    assert base_has_ready_children(base, all_stages_ready=strict)
+    mapped = {}
+
+    def compress(root, **options):
+        assert (root / "STRUCT" / "OUTPUT").is_file()
+        assert not (root / "PHONON").exists()
+        result = root.with_suffix(".7z")
+        result.write_bytes(b"clean archive")
+        return result
+
+    with patch.object(archives, "load_node", return_value=parent), patch.object(
+        archives, "archive_and_save", side_effect=compress
+    ), patch.object(archives, "_copy_calculation_input", return_value=True):
+        assert archives.generate_parent_archive(
+            parent.uuid, [base], tmp_root=tmp_path / "staging",
+            require_all_subnodes=strict, stage_nodes=mapped,
+        )
+    assert mapped == {"STRUCT": good}
+    assert good.is_finished_ok and bad.is_finished_ok and base.is_finished_ok
+    assert bad.outputs.retrieved.get_object_content("OUTPUT") == "Segmentation fault"
+
+
+def test_only_flagged_calculations_produce_no_archive(nodes, tmp_path):
+    from aiida_mpds_monitor import generate_archive as archives
+    from aiida_mpds_monitor.status import base_has_ready_children
+
+    parent, base, good, bad = nodes
+    crystal_recovery.mark_broken_processes(
+        parent, [(good, base, "STRUCT: unfinished"), (bad, base, "PHON: unfinished")],
+    )
+    assert not base_has_ready_children(base, all_stages_ready=True)
+    with patch.object(archives, "load_node", return_value=parent), patch.object(
+        archives, "archive_and_save"
+    ) as compress:
+        assert archives.generate_parent_archive(
+            parent.uuid, [base], tmp_root=tmp_path / "staging",
+        ) is None
+        assert archives.generate_archive(good.uuid, tmp_root=tmp_path / "staging") is None
+    compress.assert_not_called()

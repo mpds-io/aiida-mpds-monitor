@@ -1,4 +1,4 @@
-"""Recover a rejected CRYSTAL archive and correct falsely successful process nodes."""
+"""Recover a rejected CRYSTAL archive and flag broken calculation outputs."""
 
 import hashlib
 import logging
@@ -12,10 +12,11 @@ from aiida.engine import ProcessState
 from aiida.orm import CalcJobNode, ProcessNode, WorkChainNode
 
 from .repair_crystal import repair_archive
-from .status import EXTRA_ARCHIVE_PROCESSED, EXTRA_ARCHIVE_RECOVERY, EXTRA_PARENT_PROCESSED
+from .status import (
+    EXTRA_ARCHIVE_PROCESSED, EXTRA_ARCHIVE_RECOVERY, EXTRA_PARENT_PROCESSED, EXTRA_VALIDATION,
+)
 
 logger = logging.getLogger(__name__)
-EXTRA_VALIDATION = "mpds_archive_validation"
 
 
 def _descendants(node: ProcessNode) -> Iterable[ProcessNode]:
@@ -34,11 +35,10 @@ def mark_broken_processes(
     parent: WorkChainNode, broken: List[Tuple[CalcJobNode, WorkChainNode, str]],
     no_commit: bool = False, before_commit: Optional[Callable[[], None]] = None,
 ) -> None:
-    """Correct only confirmed, terminal CRYSTAL processes, in one transaction.
+    """Flag confirmed terminal CRYSTAL failures without rewriting process attributes.
 
-    Finished AiiDA processes are sealed. Temporarily lift that seal through the
-    storage entity, use the standard exception/state setters, and restore the
-    original seal within the same transaction. Keep the old state in extras.
+    Extras remain editable on sealed nodes. Only calculation nodes are excluded
+    from future archives; the base flag records the aggregate validation result.
     """
     if no_commit:
         if before_commit is not None:
@@ -67,26 +67,19 @@ def mark_broken_processes(
             ):
                 raise ValueError(f"Process {node.pk} changed state or belongs to another backend")
         for node, reasons in updates.values():
-            if node.process_state == ProcessState.EXCEPTED:
-                continue
             reason = "; ".join(dict.fromkeys(reasons))
-            original = {
-                "process_state": node.process_state.value,
-                "exit_status": node.exit_status,
-                "exception": node.exception,
-            }
-            sealed = node.is_sealed
-            if sealed:
-                node.backend_entity.set_attribute(node.SEALED_KEY, False)
-            try:
-                node.set_exception(f"MPDS archive validation: {reason}")
-                node.set_process_state(ProcessState.EXCEPTED)
-                node.base.extras.set(EXTRA_VALIDATION, {
-                    "status": "broken", "reason": reason, "original": original,
-                })
-            finally:
-                if sealed:
-                    node.seal()
+            previous = node.base.extras.get(EXTRA_VALIDATION, {})
+            original = previous.get("original") if isinstance(previous, dict) else None
+            if original is None:
+                original = {
+                    "process_state": node.process_state.value,
+                    "exit_status": node.exit_status,
+                    "exception": node.exception,
+                }
+            node.base.extras.set(EXTRA_VALIDATION, {
+                "status": "broken", "reason": reason, "original": original,
+                "exclude_from_archive": node.process_label == "CrystalParallelCalculation",
+            })
             marked.append((node.process_label, node.pk, reason))
         # Let the normal webhook path deliver corrected base statuses next scan.
         for base in bases.values():
@@ -98,7 +91,7 @@ def mark_broken_processes(
             before_commit()
     # Do not report a successful correction when its transaction rolled back.
     for label, pk, reason in marked:
-        logger.warning("Marked %s %s as excepted: %s", label, pk, reason)
+        logger.warning("Flagged %s %s as broken: %s", label, pk, reason)
 
 
 def _verify_retrieved_output(calculation: CalcJobNode, expected_digest: Optional[str]) -> None:
@@ -120,7 +113,7 @@ def _archive_digest(path: Path) -> str:
 
 
 def pending_recovered_archive(parent: WorkChainNode) -> Path:
-    """Resume a failed upload without rebuilding from nodes just marked excepted."""
+    """Resume a failed upload without rebuilding or revalidating flagged calculations."""
     record = parent.base.extras.get(EXTRA_ARCHIVE_RECOVERY, None)
     if not isinstance(record, dict) or record.get("status") != "ready":
         raise ValueError("No pending recovered archive")
@@ -167,7 +160,7 @@ def recover_archive(
     parent: WorkChainNode, base_nodes: Iterable[WorkChainNode], archive_path: Path,
     stage_nodes: Dict[str, CalcJobNode], no_commit: bool = False,
 ) -> Optional[Path]:
-    """Validate the rejected contents, correct mapped AiiDA nodes, and rebuild once."""
+    """Validate the rejected contents, flag mapped AiiDA nodes, and rebuild once."""
     owners = {}
     for base in base_nodes:
         if base.process_label == "BaseCrystalWorkChain":
@@ -192,7 +185,7 @@ def recover_archive(
                 logger.error("Cannot map invalid archive folder %s to a CRYSTAL node", stage.folder)
                 return None
             if stage.process_failure:
-                # A damaged archive must never rewrite a healthy source calculation.
+                # A damaged archive must never flag a healthy source calculation.
                 _verify_retrieved_output(calculation, stage.output_sha256)
                 broken.append((calculation, owners[calculation.pk], f"{stage.folder}: {stage.reason}"))
         if not broken:
@@ -205,7 +198,7 @@ def recover_archive(
             logger.warning("Cannot recover rejected archive: %s", report.error)
             return None
         cleaned_digest = _archive_digest(cleaned)
-        # Publish before committing states; restore the rejected file on failure.
+        # Publish before committing flags; restore the rejected file on failure.
         with _publication(cleaned, archive_path, expected) as publish:
             def publish_and_record() -> None:
                 publish()

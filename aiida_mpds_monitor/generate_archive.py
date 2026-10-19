@@ -12,6 +12,8 @@ load_aiida_profile()
 
 from dft_organizer.archive import archive_and_save
 
+from .status import excluded_from_archive
+
 logger = logging.getLogger(__name__)
 
 LABEL_DICT = {
@@ -64,6 +66,8 @@ def validate_subnodes_succeeded(nodes: Iterable[Any]) -> bool:
         if marker in visited:
             continue
         visited.add(marker)
+        if excluded_from_archive(node):
+            continue
 
         if getattr(node, "is_finished_ok", False) is not True:
             unsuccessful.append(_node_description(node))
@@ -216,7 +220,7 @@ def generate_archive(
         print(f"Failed to load node {uuid}: {e}")
         return None
 
-    if not validate_subnodes_succeeded([calc]):
+    if excluded_from_archive(calc) or not validate_subnodes_succeeded([calc]):
         return None
 
     repo_folder = getattr(calc.outputs, "retrieved", None)
@@ -351,6 +355,10 @@ def generate_parent_archive(
             _iter_called_descendants(base_nodes), key=lambda node: getattr(node, "pk", None) or 0
         ):
             if not isinstance(calculation, CalcJobNode):
+                continue
+
+            if excluded_from_archive(calculation):
+                logger.info("Excluding flagged CRYSTAL calculation %s", calculation.pk)
                 continue
 
             process_label = getattr(calculation, "process_label", "")

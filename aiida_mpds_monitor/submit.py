@@ -6,12 +6,13 @@ from aiida import load_profile
 from aiida.orm import WorkChainNode, load_node
 
 from .config import get_archive_key, get_auth_key, load_config, resolve_archive_upload_url
+from .archive_files import cleanup_uploaded_archive, preserve_rejected_archive
 from .generate_archive import generate_parent_archive
 from .status import (
     base_has_ready_children,
     get_node_status,
 )
-from .webhook import send_webhook, send_archive
+from .webhook import ArchiveUploadResult, send_webhook, send_archive
 
 
 def submit_parent(
@@ -155,17 +156,22 @@ def submit_parent(
                 upload_url = resolve_archive_upload_url(config, logger=logging.getLogger(__name__))
                 bid = config.get("archive_bid", None)
                 schema_id = config.get("archive_schema_id", None)
-                if send_archive(upload_url, archive_path, bid=bid, schema_id=schema_id, key=get_archive_key(config)):
+                result = ArchiveUploadResult()
+                if send_archive(upload_url, archive_path, bid=bid, schema_id=schema_id,
+                                key=get_archive_key(config), result=result):
                     print(f"Archive uploaded successfully to {upload_url}")
                     if not config.get("archive_keep", False):
-                        try:
-                            archive_path.unlink()
-                            print(f"Deleted archive {archive_path} after successful upload")
-                        except OSError as exc:
-                            print(f"Warning: could not delete archive {archive_path}: {exc}", file=sys.stderr)
+                        cleanup_uploaded_archive(
+                            archive_path, keep_errors=config.get("archive_keep_errors", False)
+                        )
                     else:
                         print(f"Kept archive {archive_path} (archive_keep=true)")
                 else:
+                    if (result.status_code is not None
+                            and config.get("archive_keep_errors", False)):
+                        preserve_rejected_archive(
+                            archive_path, directory=config.get("archive_errors_dir")
+                        )
                     print(f"Failed to upload archive to {upload_url}; keeping {archive_path} for manual recovery", file=sys.stderr)
             except Exception as e:
                 print(f"Error uploading archive: {e}", file=sys.stderr)

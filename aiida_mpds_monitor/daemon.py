@@ -15,7 +15,7 @@ from .config import (
     DEFAULT_CONFIG_PATH, get_archive_key, get_auth_key, load_config, read_config,
     resolve_archive_upload_url,
 )
-from .archive_files import parent_archive_lock
+from .archive_files import cleanup_uploaded_archive, parent_archive_lock, preserve_rejected_archive
 from .filters import (
     build_parent_query_filters,
     count_compound_elements,
@@ -192,6 +192,9 @@ def _generate_and_upload_archive(
             result=result,
             **({"errors": archive_errors} if archive_errors is not None else {}),
         )
+        if (not uploaded and result.status_code is not None
+                and config.get("archive_keep_errors", False)):
+            preserve_rejected_archive(archive_path, directory=config.get("archive_errors_dir"))
         if not uploaded and result.unfinished_crystal_output and not using_recovered:
             from .crystal_recovery import recover_archive
 
@@ -204,8 +207,12 @@ def _generate_and_upload_archive(
                 uploaded = send_archive(
                     upload_url, repaired, bid=config.get("archive_bid"),
                     schema_id=config.get("archive_schema_id"), key=get_archive_key(config),
+                    result=result,
                     **({"errors": archive_errors} if archive_errors is not None else {}),
                 )
+                if (not uploaded and result.status_code is not None
+                        and config.get("archive_keep_errors", False)):
+                    preserve_rejected_archive(repaired, directory=config.get("archive_errors_dir"))
     except Exception as exc:
         logger.exception(
             f"Error uploading archive for parent {parent_node.pk}: {exc}"
@@ -232,11 +239,7 @@ def _generate_and_upload_archive(
         logger.info(f"Kept archive {archive_path} (archive_keep=true)")
         return True
 
-    try:
-        archive_path.unlink()
-        logger.info(f"Deleted archive {archive_path} after successful upload")
-    except OSError as exc:
-        logger.warning(f"Could not delete archive {archive_path}: {exc}")
+    cleanup_uploaded_archive(archive_path, keep_errors=config.get("archive_keep_errors", False))
     return True
 
 

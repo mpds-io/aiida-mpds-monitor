@@ -1,11 +1,58 @@
 """Atomic archive publication and coordination between local monitor processes."""
 
 import hashlib
+import logging
 import os
 import tempfile
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Iterator
+from typing import Iterator, Optional, Union
+
+logger = logging.getLogger(__name__)
+
+
+def preserve_rejected_archive(
+    path: Path, directory: Optional[Union[str, Path]] = None,
+) -> Path:
+    """Save an independent, deduplicated copy before recovery replaces the original."""
+    path = Path(path)
+    destination = Path(directory).expanduser() if directory else path.parent
+    destination.mkdir(parents=True, exist_ok=True)
+    digest = hashlib.sha256()
+    with tempfile.NamedTemporaryFile(dir=destination, delete=False) as stream:
+        staged = Path(stream.name)
+        try:
+            with path.open("rb") as source:
+                for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                    digest.update(chunk)
+                    stream.write(chunk)
+            stream.flush()
+            os.fsync(stream.fileno())
+            retained = destination / f"{path.stem}.rejected-{digest.hexdigest()}.7z"
+            try:
+                os.link(staged, retained)
+            except FileExistsError:
+                pass
+        finally:
+            staged.unlink(missing_ok=True)
+    logger.info("Kept rejected archive for inspection: %s", retained)
+    return retained
+
+
+def cleanup_uploaded_archive(path: Path, keep_errors: bool = False) -> None:
+    """Remove a delivered archive and disposable report, then empty output directories."""
+    path = Path(path)
+    for artifact in [path] + ([] if keep_errors else [path.with_suffix(".validation.json")]):
+        try:
+            artifact.unlink(missing_ok=True)
+        except OSError as exc:
+            logger.warning("Could not delete %s: %s", artifact, exc)
+    if path.parent.parent.name == "archives":
+        for directory in (path.parent, path.parent.parent):
+            try:
+                directory.rmdir()
+            except OSError:
+                break  # Other parents, retained diagnostics, or concurrent work remain.
 
 
 def write_report(path: Path, contents: str, overwrite: bool = True) -> None:

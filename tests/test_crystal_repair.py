@@ -273,6 +273,8 @@ def test_monitor_checks_stages_and_uploads_only_clean_archive(tmp_path, parser, 
             options["result"].status_code = 422
             options["result"].description = "Archive validation failed: Found not a finished output"
             return False
+        saved = json.loads(archive_path.with_suffix(".validation.json").read_text())
+        assert next(r for r in saved["stages"] if r["folder"] == "PHONON")["status"] == "broken"
         return upload_success
 
     with patch.object(generation, "load_node", return_value=parent), patch.object(
@@ -288,8 +290,8 @@ def test_monitor_checks_stages_and_uploads_only_clean_archive(tmp_path, parser, 
     mark.assert_called_once()
     assert mark.call_args.args[1][0][0] is nodes[1]
     assert archive_path.exists() is (not upload_success)
-    saved = json.loads(archive_path.with_suffix(".validation.json").read_text())
-    assert next(r for r in saved["stages"] if r["folder"] == "PHONON")["status"] == "broken"
+    assert archive_path.with_suffix(".validation.json").exists() is (not upload_success)
+    assert archive_path.parent.exists() is (not upload_success)
 
 
 def test_cli_dry_run_does_not_upload(tmp_path, parser, monkeypatch):

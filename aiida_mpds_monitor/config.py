@@ -31,6 +31,8 @@ DEFAULT_CONFIG = {
     "log_backup_count": 3,
     "archive_upload_url": "",
     "archive_keep": False,
+    "archive_keep_errors": False,
+    "archive_errors_dir": "",
     "archive_key": "",
     "send_archive": True,
     "send_archives_all_stages_ready": False,

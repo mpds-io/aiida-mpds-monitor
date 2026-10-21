@@ -96,9 +96,12 @@ def test_timeout_does_not_trigger_recovery(tmp_path):
 
 @pytest.mark.parametrize("retry_status", [200, 422, 503])
 @pytest.mark.parametrize("no_commit", [False, True])
+@pytest.mark.parametrize("keep_errors", [False, True])
+@pytest.mark.parametrize("keep_archive", [False, True])
 def test_422_recovery_marks_real_nodes_and_retries_clean_archive_once(
-    tmp_path, monkeypatch, nodes, retry_status, no_commit,
+    tmp_path, monkeypatch, nodes, retry_status, no_commit, keep_errors, keep_archive,
 ):
+    monkeypatch.chdir(tmp_path)
     parent, base, good, bad = nodes
     folder = tmp_path / "contents"
     stage(folder, "STRUCT", OUTPUT)
@@ -106,6 +109,8 @@ def test_422_recovery_marks_real_nodes_and_retries_clean_archive_once(
     archive = tmp_path / "NaCl.7z"
     with py7zr.SevenZipFile(archive, "w") as output:
         output.writeall(folder, arcname="NaCl")
+    original = archive.read_bytes()
+    errors_dir = tmp_path / "unsent"
     parser = MagicMock()
     parser.acceptable.return_value = True
     parser.return_value.info = parsed()
@@ -139,12 +144,24 @@ def test_422_recovery_marks_real_nodes_and_retries_clean_archive_once(
         "aiida_mpds_monitor.webhook.requests.post", side_effect=post
     ):
         assert daemon.generate_and_upload_archive(
-            parent, [base], {"archive_keep": True, "archive_key": "test-key",
+            parent, [base], {"archive_keep": keep_archive, "archive_keep_errors": keep_errors,
+                             "archive_errors_dir": str(errors_dir),
+                             "archive_key": "test-key",
                              "archive_bid": 2, "archive_schema_id": 3}, MagicMock(),
             archive_errors=errors, no_commit=no_commit,
         ) is (retry_status == 200)
     assert calls == 2
-    assert archive.with_suffix(".validation.json").exists()
+    assert archive.exists() is (keep_archive or retry_status != 200)
+    assert archive.with_suffix(".validation.json").exists() is (
+        keep_archive or keep_errors or retry_status != 200
+    )
+    rejected = list(errors_dir.glob("NaCl.rejected-*.7z"))
+    assert len(rejected) == (0 if not keep_errors else 1 if retry_status == 200 else 2)
+    if keep_errors:
+        assert any(path.read_bytes() == original for path in rejected)
+        if retry_status != 200:
+            assert any(path.read_bytes() == archive.read_bytes() for path in rejected)
+    assert not list(tmp_path.glob("crystal-recovery-*"))
     assert (folder / "PHON" / "OUTPUT").exists()
     assert good.is_finished_ok
     assert bool(errors.consume()) is (retry_status != 200)

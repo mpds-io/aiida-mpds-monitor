@@ -3,7 +3,7 @@ import logging
 import re
 import shutil
 from pathlib import Path
-from typing import Any, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional
 
 from aiida import load_profile as load_aiida_profile
 from aiida.orm import CalcJobNode, load_node, WorkChainNode
@@ -11,6 +11,8 @@ from aiida.orm import CalcJobNode, load_node, WorkChainNode
 load_aiida_profile()
 
 from dft_organizer.archive import archive_and_save
+
+from .status import excluded_from_archive
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +66,8 @@ def validate_subnodes_succeeded(nodes: Iterable[Any]) -> bool:
         if marker in visited:
             continue
         visited.add(marker)
+        if excluded_from_archive(node):
+            continue
 
         if getattr(node, "is_finished_ok", False) is not True:
             unsuccessful.append(_node_description(node))
@@ -124,7 +128,10 @@ def _finalize_archive(source_dir: Path, dest_path: Path) -> Optional[Path]:
 
 def _safe_dir_name(name: str) -> str:
     """Create a filesystem-safe directory name from a node label."""
-    return str(name).strip().replace("/", "_")
+    result = str(name).strip().replace("/", "_").replace("\\", "_")
+    if result in ("", ".", ".."):
+        raise ValueError("Calculation directory name must not be empty or a traversal component")
+    return result
 
 
 def _copy_calculation_input(
@@ -194,6 +201,19 @@ def _iter_called_descendants(nodes: Iterable[Any]) -> Iterable[Any]:
             )
 
 
+def _cleanup_staging(directory: Path, root: Path) -> None:
+    """Remove this job's staging files and the shared root only when empty."""
+    try:
+        if directory.exists():
+            shutil.rmtree(directory)
+    except OSError as exc:
+        logger.warning("Could not clean up temporary directory %s: %s", directory, exc)
+    try:
+        root.rmdir()
+    except OSError:
+        pass  # Another job or persistent coordination files may still use the root.
+
+
 def generate_archive(
     uuid: str,
     archive_path: Optional[Path] = None,
@@ -213,7 +233,7 @@ def generate_archive(
         print(f"Failed to load node {uuid}: {e}")
         return None
 
-    if not validate_subnodes_succeeded([calc]):
+    if excluded_from_archive(calc) or not validate_subnodes_succeeded([calc]):
         return None
 
     repo_folder = getattr(calc.outputs, "retrieved", None)
@@ -231,61 +251,72 @@ def generate_archive(
         shutil.rmtree(calc_dir)
     calc_dir.mkdir(parents=True, exist_ok=True)
 
-    # Copy all files from retrieved folder
+    result = None
     try:
-        names = repo_folder.list_object_names()
-        for name in names:
-            with repo_folder.open(name, "rb") as src, (calc_dir / name).open("wb") as dst:
-                shutil.copyfileobj(src, dst)
-    except Exception as e:
-        print(f"Error copying files for {uuid}: {e}")
-        return None
-
-    if not _copy_calculation_input(calc, calc_dir, names):
-        shutil.rmtree(calc_dir)
-        return None
-
-    # Write INPUT.json if parameters are present
-    try:
-        params = None
-        if save_input_json and hasattr(calc.inputs, "parameters"):
-            try:
-                params = calc.inputs.parameters.get_dict()
-            except Exception:
-                params = None
-
-        if params:
-            with (calc_dir / "INPUT.json").open("w") as f:
-                json.dump(params, f, indent=2, default=str)
-    except Exception:
-        pass
-
-    # Ensure OUTPUT or scheduler stderr is present in the archive
-    try:
-        names = repo_folder.list_object_names()
-        if "OUTPUT" in names:
-            with repo_folder.open("OUTPUT", "rb") as src, (calc_dir / "OUTPUT").open("wb") as dst:
-                shutil.copyfileobj(src, dst)
-        elif "_scheduler-stderr.txt" in names:
-            with repo_folder.open("_scheduler-stderr.txt", "rb") as src:
-                with (calc_dir / "_scheduler-stderr.txt").open("wb") as dst:
+        # Copy all files from retrieved folder
+        try:
+            names = repo_folder.list_object_names()
+            for name in names:
+                with repo_folder.open(name, "rb") as src, (calc_dir / name).open("wb") as dst:
                     shutil.copyfileobj(src, dst)
-    except Exception:
-        pass
+        except Exception as e:
+            print(f"Error copying files for {uuid}: {e}")
+            return None
 
-    if archive_path is None:
-        archive_path = tmp_root.parent / f"{uuid}.7z"
-    archive_path = Path(archive_path)
+        if not _copy_calculation_input(calc, calc_dir, names):
+            return None
 
-    # archive_and_save creates {calc_dir}.7z next to calc_dir
-    _ = archive_and_save(calc_dir, make_report=False)
+        # Write INPUT.json if parameters are present
+        try:
+            params = None
+            if save_input_json and hasattr(calc.inputs, "parameters"):
+                try:
+                    params = calc.inputs.parameters.get_dict()
+                except Exception:
+                    params = None
 
-    result = _finalize_archive(calc_dir, archive_path)
-    if result:
-        print(f"Archive created: {result}")
-    else:
-        print(f"Failed to create archive for {uuid}")
-    return result
+            if params:
+                with (calc_dir / "INPUT.json").open("w") as f:
+                    json.dump(params, f, indent=2, default=str)
+        except Exception:
+            pass
+
+        # Ensure OUTPUT or scheduler stderr is present in the archive
+        try:
+            names = repo_folder.list_object_names()
+            if "OUTPUT" in names:
+                with repo_folder.open("OUTPUT", "rb") as src, (calc_dir / "OUTPUT").open("wb") as dst:
+                    shutil.copyfileobj(src, dst)
+            elif "_scheduler-stderr.txt" in names:
+                with repo_folder.open("_scheduler-stderr.txt", "rb") as src:
+                    with (calc_dir / "_scheduler-stderr.txt").open("wb") as dst:
+                        shutil.copyfileobj(src, dst)
+        except Exception:
+            pass
+
+        if archive_path is None:
+            archive_path = tmp_root.parent / f"{uuid}.7z"
+        archive_path = Path(archive_path)
+
+        # archive_and_save creates {calc_dir}.7z next to calc_dir
+        _ = archive_and_save(calc_dir, make_report=False)
+
+        result = _finalize_archive(calc_dir, archive_path)
+        if result:
+            print(f"Archive created: {result}")
+        else:
+            print(f"Failed to create archive for {uuid}")
+        return result
+
+    finally:
+        # The compressor writes beside calc_dir; discard incomplete output on failure.
+        intermediate = calc_dir.with_name(f"{calc_dir.name}.7z")
+        if result is None or Path(result).resolve() != intermediate.resolve():
+            try:
+                intermediate.unlink(missing_ok=True)
+            except OSError as exc:
+                logger.warning("Could not delete temporary archive %s: %s", intermediate, exc)
+        _cleanup_staging(calc_dir, tmp_root)
 
 
 def generate_parent_archive(
@@ -295,6 +326,7 @@ def generate_parent_archive(
     tmp_root: Optional[Path] = None,
     require_all_subnodes: bool = True,
     save_input_json: bool = False,
+    stage_nodes: Optional[Dict[str, Any]] = None,
 ) -> Optional[Path]:
     """
     Generate a 7z archive for the parent WorkChain with subdirectories for each
@@ -343,10 +375,21 @@ def generate_parent_archive(
 
     try:
         # Traverse every nested workflow and collect retrieved data from CalcJobs.
-        for calculation in _iter_called_descendants(base_nodes):
+        for calculation in sorted(
+            _iter_called_descendants(base_nodes), key=lambda node: getattr(node, "pk", None) or 0
+        ):
             if not isinstance(calculation, CalcJobNode):
                 continue
 
+            if excluded_from_archive(calculation):
+                logger.info("Excluding flagged CRYSTAL calculation %s", calculation.pk)
+                continue
+
+            process_label = getattr(calculation, "process_label", "")
+            is_crystal_calculation = (
+                isinstance(process_label, str) and process_label.startswith("Crystal")
+                and process_label.endswith("Calculation")
+            )
             if (
                 not require_all_subnodes
                 and getattr(calculation, "is_finished_ok", False) is not True
@@ -375,7 +418,12 @@ def generate_parent_archive(
                 continue
 
             calculation_dir = archive_root / label_str
+            if is_crystal_calculation and calculation_dir.exists():
+                # A retry must not inherit missing/corrupted files from an older attempt.
+                shutil.rmtree(calculation_dir)
             calculation_dir.mkdir(parents=True, exist_ok=True)
+            if stage_nodes is not None:
+                stage_nodes[label_str] = calculation
             for name in names:
                 try:
                     with repo_folder.open(name, "rb") as src:
@@ -407,12 +455,13 @@ def generate_parent_archive(
                     f"{calculation.pk}: {e}"
                 )
 
+        if archive_path is None:
+            # Equal material labels in different parents must not share a local archive.
+            archive_path = tmp_root.parent / "archives" / _safe_dir_name(parent_uuid) / f"{parent_dir_name}.7z"
+        archive_path = Path(archive_path)
+
         if not validate_archive_contents(archive_root):
             return None
-
-        if archive_path is None:
-            archive_path = tmp_root.parent / f"{parent_dir_name}.7z"
-        archive_path = Path(archive_path)
 
         # archive_and_save creates {archive_root}.7z next to archive_root
         _ = archive_and_save(archive_root, aiida=True, skip_errors=True)
@@ -425,12 +474,7 @@ def generate_parent_archive(
         return result
 
     finally:
-        # Always attempt to remove the temporary directory
-        try:
-            if parent_tmp.exists():
-                shutil.rmtree(parent_tmp)
-        except Exception as e:
-            print(f"Warning: Failed to clean up temp dir {parent_tmp}: {e}")
+        _cleanup_staging(parent_tmp, tmp_root)
 
 
 if __name__ == "__main__":

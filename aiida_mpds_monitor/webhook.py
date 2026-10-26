@@ -1,4 +1,5 @@
 import logging
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 from urllib.parse import quote
@@ -6,6 +7,29 @@ from urllib.parse import quote
 import requests
 
 logger = logging.getLogger(__name__)
+
+
+def _safe_text(value: object, key: Optional[str]) -> str:
+    """Servers and request exceptions can echo credentials outside the form fields."""
+    text = str(value)
+    if key:
+        for secret in (key, quote(key, safe="")):
+            text = text.replace(secret, "[REDACTED]")
+    return text[:5000]
+
+
+@dataclass
+class ArchiveUploadResult:
+    """Response details for one upload; independent of notification deduplication."""
+
+    status_code: Optional[int] = None
+    description: str = ""
+
+    @property
+    def unfinished_crystal_output(self) -> bool:
+        return self.status_code == 422 and " ".join(self.description.split()) == (
+            "Archive validation failed: Found not a finished output"
+        )
 
 
 class ArchiveUploadErrors:
@@ -22,9 +46,7 @@ class ArchiveUploadErrors:
     def failed(self, url: str, description: str, key: Optional[str] = None) -> None:
         if url in self._failed:
             return
-        if key:
-            for secret in (key, quote(key, safe="")):
-                description = description.replace(secret, "[REDACTED]")
+        description = _safe_text(description, key)
         self._failed.add(url)
         self._pending[url] = " ".join(description.split())[:500]
 
@@ -65,7 +87,7 @@ def send_webhook(webhook_url, payload, status, key=None):
         if response.status_code == 409:
             logger.info(
                 "Webhook returned 409 for %s (already exists on server) — marking as done; data=%r",
-                webhook_url,
+                _safe_text(webhook_url, key),
                 log_data,
             )
             return True
@@ -74,9 +96,9 @@ def send_webhook(webhook_url, payload, status, key=None):
         logger.error(
             "Webhook returned non-200 status %s for %s; data=%r; response=%r",
             response.status_code,
-            webhook_url,
+            _safe_text(webhook_url, key),
             log_data,
-            getattr(response, "text", None),
+            _safe_text(getattr(response, "text", None), key),
         )
         return False
     except Exception as e:
@@ -84,8 +106,8 @@ def send_webhook(webhook_url, payload, status, key=None):
 
         logger.error(
             "Webhook error: %s (url=%s, data=%r)",
-            e,
-            webhook_url,
+            _safe_text(e, key),
+            _safe_text(webhook_url, key),
             log_data,
         )
         return False
@@ -94,6 +116,7 @@ def send_webhook(webhook_url, payload, status, key=None):
 def send_archive(
     upload_url, archive_path, bid: int | None = None, schema_id: int | None = None,
     key: str | None = None, timeout: int = 30, errors: Optional[ArchiveUploadErrors] = None,
+    result: Optional[ArchiveUploadResult] = None,
 ) -> bool:
     """
     Upload a 7z archive file to the given `upload_url` endpoint using multipart/form-data.
@@ -111,6 +134,9 @@ def send_archive(
         bool: True if upload returned HTTP 200, False otherwise
     """
     data = {}
+    if result is not None:
+        result.status_code = None
+        result.description = ""
     if bid is not None:
         data["bid"] = str(bid)
     if schema_id is not None:
@@ -131,21 +157,28 @@ def send_archive(
                 timeout=timeout,
             )
 
+        if result is not None:
+            result.status_code = resp.status_code
         if resp.status_code == 200:
             if errors is not None:
                 errors.succeeded(upload_url)
             return True
 
+        description = "Server did not provide an error explanation"
+        try:
+            body = resp.json()
+            if isinstance(body, dict):
+                detail = body.get("detail") or body.get("description")
+                if isinstance(detail, str) and detail.strip():
+                    description = detail
+            elif isinstance(body, str) and body.strip():
+                description = body.strip()
+        except ValueError:
+            if isinstance(resp.text, str) and resp.text.strip():
+                description = resp.text.strip()
+        if result is not None:
+            result.description = description
         if errors is not None:
-            description = "Server did not provide an error explanation"
-            try:
-                body = resp.json()
-                if isinstance(body, dict):
-                    detail = body.get("detail") or body.get("description")
-                    if isinstance(detail, str) and detail.strip():
-                        description = detail
-            except ValueError:
-                pass
             errors.failed(
                 upload_url, f"Archive upload failed (HTTP {resp.status_code}): {description}", key,
             )
@@ -153,13 +186,14 @@ def send_archive(
         logger.error(
             "Archive upload returned non-200 status %s for %s; data=%r; response=%r",
             resp.status_code,
-            upload_url,
+            _safe_text(upload_url, key),
             data,
-            getattr(resp, "text", None),
+            _safe_text(getattr(resp, "text", None), key),
         )
         return False
     except Exception as e:
         if errors is not None:
             errors.failed(upload_url, f"Archive upload failed ({type(e).__name__})", key)
-        logger.error("Archive upload error: %s (url=%s, data=%r)", e, upload_url, data)
+        logger.error("Archive upload error: %s (url=%s, data=%r)",
+                     _safe_text(e, key), _safe_text(upload_url, key), data)
         return False

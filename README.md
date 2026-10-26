@@ -1,560 +1,357 @@
 # aiida-mpds-monitor
 
-A daemon and CLI tool that monitors AiiDA workflows and sends webhooks when configured child workchains complete. Built for the MPDS backend: when a calculation finishes or fails, the tool posts a status payload to a configured endpoint and uploads a `7z` archive of retrieved outputs. The workchain hierarchy and endpoints live in a YAML config file, so you can monitor new workchain types without editing code.
+**aiida-mpds-monitor** monitors AiiDA workflows and **sends calculation status webhooks and result archives to MPDS**. It provides a polling daemon and command-line tools for submitting results, repairing CRYSTAL archives, and sending Telegram reports.
+
+## Features
+
+- YAML configuration for parent, child, and calculation process types.
+- Status webhooks for completed and failed calculations.
+- `.7z` archives of retrieved outputs and submitted inputs.
+- CRYSTAL archive validation and recovery after a specific server rejection.
+- Workflow filters by creation date, formula, and chemical elements.
+- Optional Telegram reports for running calculations and upload errors.
+- Dry runs, delivery tracking, and rotating logs.
+
+## Prerequisites
+
+- Python 3.9 or later, as declared in the package metadata.
+- Git to install the project and its Git-based dependency.
+- A configured default AiiDA profile with access to the workflows and retrieved files.
+- Write access to the working directory and configured log location.
+- Webhook and archive upload endpoints for MPDS delivery.
+
+The package installs `aiida-core`, `PyYAML`, `requests`, and `dft_organizer`. CRYSTAL validation uses `pycrystal` and the scientific Python dependencies supplied through `dft_organizer`.
 
 ## Installation
+
+Install into the environment that provides your AiiDA profile:
 
 ```bash
 git clone https://github.com/mpds-io/aiida-mpds-monitor.git
 cd aiida-mpds-monitor
-pip install .
+python -m pip install .
 ```
 
-## Workflow Label Requirement
+For an editable development installation:
 
-> [!IMPORTANT]
-> The **label** field on AiiDA workflows determines webhook delivery and server-side processing. The monitor uses it to identify which object the workflow belongs to and which task it solved. Workflows without a label are skipped.
-> Give each workflow a descriptive label, e.g. `HgI2/137: Geometry optimization`.
+```bash
+python -m pip install -e '.[dev]'
+```
 
-## Configuration
+## Quick start
 
-On first run the tool writes a default config file at
-`~/.aiida/aiida_mpds_monitor/conf.yaml`.
+Create the configuration directory:
+
+```bash
+mkdir -p ~/.aiida/aiida_mpds_monitor
+```
+
+Save this configuration as `~/.aiida/aiida_mpds_monitor/conf.yaml`. Replace the local endpoints with your server URLs before sending results.
 
 ```yaml
 webhook_url: "http://localhost:8080"
+archive_upload_url: "http://localhost:8080/upload"
+poll_interval: 30
 
-# Separate endpoint for archive uploads. Leave empty to use ARCHIVE_UPLOAD_URL
-# from the environment, or the built-in upload endpoint if it is unset.
-archive_upload_url: "http://localhost:8080"
-
-# Keep .7z archives on disk after upload? (default: false — delete on success)
+send_archive: true
 archive_keep: false
-
-# Auth key for archive uploads. Leave empty to fall back to MPDS_MONITOR_KEY.
-# Can also be set via the MPDS_ARCHIVE_KEY environment variable.
-archive_key: ""
-
-# Disable archive generation and upload entirely (default: true)
-# send_archive: false
-# send_archives_all_stages_ready: false
-
-poll_interval: 60
-
-# Optional automatic-monitor filters. Empty values disable each filter.
-monitor_filters:
-  # Parent creation dates in simple YYYY-MM-DD format. The complete first and
-  # last days are included. Full ISO 8601 timestamps are also accepted.
-  created_after: null
-  created_before: null
-  # Rolling alternative to created_after; only parents this many hours old or
-  # newer are scanned. If both are set, the more restrictive bound is used.
-  max_age_hours: null
-  # Filter child labels by distinct elements in their leading formula.
-  # Use positive integers: 2=binary, 3=ternary, and so on.
-  element_counts: []
-  # Optional strict lower bound. 2 accepts compounds with 3 or more elements.
-  element_count_greater_than: null
-  # Optional exact formulas taken from the beginning of workflow labels.
-  compounds: []
-  # Optional element symbols. Match at least one by default, or set
-  # elements_match to "all" to require every listed element.
-  elements: []
-  elements_match: any
+archive_keep_errors: false
+archive_errors_dir: ""  # Optional directory for preserved rejected archives.
 
 workchain_hierarchy:
   MPDSStructureWorkChain:
     BaseCrystalWorkChain:
       - CrystalParallelCalculation
 
-log_file: "/path/to/logs/aiida_mpds_monitor.log"
-log_level: "WARNING"          # DEBUG, INFO, WARNING, ERROR
-log_max_bytes: 10485760       # 10 MB
-log_backup_count: 5
+log_file: "./aiida_mpds_monitor.log"
+log_max_bytes: 10485760
+log_backup_count: 3
 ```
 
-### YAML settings and environment variables
-
-`—` means there is no environment equivalent. Dotted keys are nested under
-`monitor_filters` in YAML. Environment variables take priority for authentication
-and Telegram settings; `archive_upload_url` in YAML takes priority over
-`ARCHIVE_UPLOAD_URL`.
-
-| YAML key | Environment equivalent | Description |
-| --- | --- | --- |
-| `webhook_url` | — | URL receiving calculation status webhooks. |
-| `auth_key` | `MPDS_MONITOR_KEY` | Authentication key included in webhook form data. |
-| `poll_interval` | — | Seconds between monitor scans (default: `30`). |
-| `workchain_hierarchy` | — | Map of parent, child, and grandchild process labels to monitor. |
-| `archive_upload_url` | `ARCHIVE_UPLOAD_URL` | Archive upload URL; uses the built-in endpoint if both are unset. |
-| `archive_key` | `MPDS_ARCHIVE_KEY` | Archive authentication token; falls back to the webhook key if both are unset. |
-| `archive_bid` | — | Optional identifier sent as the archive upload's `bid` form field. |
-| `archive_schema_id` | — | Optional identifier sent as the archive upload's `schema_id` form field. |
-| `archive_keep` | — | Keep local archives after successful upload (default: `false`); failures always retain them. |
-| `send_archive` | — | Enable archive generation and upload (default: `true`). |
-| `send_archives_all_stages_ready` | — | Require all configured subcalculations to succeed before archiving (default: `false`). |
-| `telegram_bot_token` | `TELEGRAM_BOT_TOKEN` | Bot token; required together with a chat ID to enable Telegram reports. |
-| `telegram_chat_id` | `TELEGRAM_CHAT_ID` | Destination chat or group ID for Telegram reports. |
-| `notification_time` | — | Daily report time in `HH:MM` format (default: `09:00`). |
-| `notification_timezone` | — | IANA timezone for daily reports (default: `UTC`). |
-| `notification_user_name` | — | Default user name shown in this monitor's Telegram reports. |
-| `notification_user_names` | — | Map of AiiDA owner emails to names or Telegram usernames. |
-| `running_alert_hours` | — | Running duration limit in hours; `null` disables long-running alerts, while statistics still send. |
-| `log_file` | — | Path to the monitor's log file. |
-| `log_level` | — | YAML logging level; the daemon CLI overrides it with `--logging-level` (default: `ERROR`). |
-| `log_max_bytes` | — | Log rotation size in bytes (default: `10485760`). |
-| `log_backup_count` | — | Number of rotated log files to retain (default: `3`). |
-| `monitor_filters` | — | Optional filters for automatic MPDS processing; Telegram reports ignore them. |
-| `monitor_filters.created_after` | — | Inclusive earliest parent creation date or ISO 8601 timestamp. |
-| `monitor_filters.created_before` | — | Inclusive latest parent creation date or ISO 8601 timestamp. |
-| `monitor_filters.max_age_hours` | — | Scan parents no older than this many hours; combines with `created_after` using the stricter bound. |
-| `monitor_filters.element_counts` | — | Allowed distinct element counts in workflow label formulas, such as `[3, 4]`. |
-| `monitor_filters.element_count_greater_than` | — | Exclusive lower bound on distinct element counts. |
-| `monitor_filters.compounds` | — | Exact formulas to match at the beginning of workflow labels. |
-| `monitor_filters.elements` | — | Element symbols that workflow label formulas must contain. |
-| `monitor_filters.elements_match` | — | Match `any` (default) or `all` configured element symbols. |
-
-For webhook authentication, resolution is `MPDS_MONITOR_KEY`, then `auth_key`,
-then `security_key`. Archive authentication uses `MPDS_ARCHIVE_KEY`, then
-`archive_key`, then that webhook authentication key. Telegram settings use the
-environment variable, then the lowercase YAML key, then its uppercase YAML alias.
-
-The daemon reloads `~/.aiida/aiida_mpds_monitor/conf.yaml` before each polling
-cycle. YAML changes take effect on the next cycle without a restart; existing
-running timers and daily report history are retained. If a reload fails, the
-monitor logs a warning and keeps its previous settings.
-
-To rotate an archive token while the monitor runs, update `archive_key` in YAML.
-This works when `MPDS_ARCHIVE_KEY` was not set at startup, since the environment
-value still takes priority. Changing environment variables requires restarting
-the monitor from a shell or service with the new values.
-
-## Usage
-
-1. Configure the workchain hierarchy:
-
-```yaml
-# ~/.aiida/aiida_mpds_monitor
-webhook_url: "http://example.com/webhook"
-auth_key: "your-api-key"
-workchain_hierarchy:
-  ParentType:
-    ChildType:
-      - GrandchildType1
-```
-
-2. Set the auth key and start the daemon:
+Set the authentication key and inspect a scan:
 
 ```bash
-export MPDS_MONITOR_KEY="your-api-key"
-# Optional: separate key for archive uploads
-export MPDS_ARCHIVE_KEY="your-archive-key"
-aiida-mpds-monitor
+export MPDS_MONITOR_KEY="<webhook-key>"
+aiida-mpds-monitor --dry-run --resend-all --logging-level INFO
 ```
 
-The daemon:
-
-- Scans for parent workflows matching configured types every `poll_interval` seconds.
-- Walks each parent to its children and grandchildren.
-- Checks grandchild calculation status.
-- Sends a webhook with the status.
-- Generates a `.7z` archive and uploads it to `archive_upload_url` (skip with `send_archive: false`).
-- Deletes the local archive on successful upload (unless `archive_keep: true`).
-- Marks processed parents to avoid duplicates.
-
-### Filtering monitored workflows
-
-Filters apply to the continuously running `aiida-mpds-monitor` daemon. They do
-not restrict an explicitly requested `aiida-mpds-submit PARENT_PK` operation.
-
-For example, to monitor binary and ternary compounds created since August 1,
-2026:
-
-```yaml
-monitor_filters:
-  created_after: 2026-08-01
-  created_before: 2026-08-31
-  element_counts: [2, 3]
-```
-
-For a rolling seven-day window instead:
-
-```yaml
-monitor_filters:
-  max_age_hours: 168
-  element_counts: [2, 3]
-```
-
-To send only compounds with more than two distinct elements:
-
-```yaml
-monitor_filters:
-  element_count_greater_than: 2
-```
-
-If `element_counts` and `element_count_greater_than` are both configured, a
-compound must satisfy both filters. For example, `[2, 3, 4]` combined with a
-threshold of `2` accepts only counts `3` and `4`.
-
-To send only specific compounds:
-
-```yaml
-monitor_filters:
-  compounds: [BaMnO3, HgI2]
-```
-
-To send compounds containing either barium or manganese:
-
-```yaml
-monitor_filters:
-  elements: [Ba, Mn]
-  elements_match: any
-```
-
-To require both elements in every compound:
-
-```yaml
-monitor_filters:
-  elements: [Ba, Mn]
-  elements_match: all
-```
-
-All enabled compound filters are combined with AND. Formula matching is exact
-and case-sensitive: `BaMnO3` matches labels beginning with `BaMnO3`, but not
-`Ba2MnO4`.
-
-The element count is taken from the chemical formula at the beginning of the
-workflow label. For example, `BaPd3P/109: Geometry optimization` is ternary
-(three distinct elements), while `HgI2/137: Geometry optimization` is binary.
-When `element_counts` is enabled, labels without a recognizable leading
-formula are skipped and recorded in the log. Time bounds filter the parent
-workchain's AiiDA `ctime`.
-
-Options:
-
-- `--dry-run`: Scan and log, skip sends and marks.
-- `--no-commit`: Send webhooks, skip setting AiiDA extras.
-- `--resend-all`: Scan all eligible parents once, including previously processed
-  parents, then exit. Existing successful webhook and archive markers are
-  respected; only deliveries without success markers are retried. Configured
-  hierarchy and monitor filters still apply.
-- `--logging-level` / `-l`: Set verbosity (DEBUG through CRITICAL; defaults to ERROR).
-
-`--dry-run` and `--no-commit` are mutually exclusive; `--dry-run` wins.
-
-Examples:
-
-```bash
-aiida-mpds-submit 12345                        # default log level (ERROR)
-aiida-mpds-submit 12345 --logging-level INFO  # more verbosity
-aiida-mpds-monitor --logging-level DEBUG      # debug daemon
-```
-
-3. Submit a single parent by hand (useful for backfills or debugging):
-
-```bash
-# Send webhooks for all configured children of parent PK=12345
-aiida-mpds-submit 12345
-
-# Dry-run: see what would be sent (no HTTP request)
-aiida-mpds-submit 12345 --dry-run
-```
-
-If you prefer environment-based auth instead of storing the key in the settings file:
-
-```bash
-export MPDS_MONITOR_KEY="your-api-key"
-aiida-mpds-submit 12345
-```
-
-## Telegram reports in a shared chat
-
-The monitor sends **RUNNING calculations that exceed `running_alert_hours`** to
-one shared Telegram group, followed by a separate statistics message. Each
-calculation entry identifies its owner, label, PK, execution hostname when
-available, and elapsed running time. Statistics include all RUNNING processes
-selected by this monitor, including those within the limit.
-
-To send a current calculation report to the group immediately, use:
-
-```bash
-aiida-mpds-notify
-```
-
-This one-shot command scans the current AiiDA profile and sends details for all
-running calculations, followed by the same statistics format as the daemon.
-Use `aiida-mpds-notify --overdue-only` to include calculation details only when
-they exceed `running_alert_hours`, like the scheduled report. Statistics are
-still sent even when no calculations qualify. The command uses the configured
-`workchain_hierarchy`, Telegram bot token, and chat ID; environment credentials
-take priority over YAML. `--config PATH` selects another config file. It does
-not send webhooks or archives, or change the daemon's report schedule. It
-returns a nonzero exit status if the scan or Telegram delivery fails.
-
-Reports are checked after the first successful scan at daemon startup and once
-a day at the configured time. If no calculations are over the limit, the bot
-sends the statistics message alone, including when RUNNING is zero. The monitor only
-sends messages; it does
-not handle commands or buttons such as `/running`, or send completion/failure
-alerts when a process reaches a terminal state.
-
-### Setup
-
-1. Open [@BotFather](https://t.me/BotFather) in Telegram, send `/newbot`, and
-   follow the prompts. Save the token it returns. See Telegram's
-   [bot setup guide](https://core.telegram.org/bots/tutorial).
-2. Add the bot to your shared group and allow it to send messages. Send a command
-   addressed to it, such as `/start@YourBotUsername`, to make the group visible
-   in the next step. This command is only for discovering the group ID.
-3. Call the HTTPS Bot API method `getUpdates` using your token and read
-   `result[].message.chat.id` from the reply. Group IDs may be negative.
-   See [getUpdates](https://core.telegram.org/bots/api#getupdates).
-4. Set both variables in the environment of the daemon's service:
-
-```bash
-export TELEGRAM_BOT_TOKEN="<token-from-BotFather>"
-export TELEGRAM_CHAT_ID="<shared-group-chat-id>"
-```
-
-5. Set a positive `running_alert_hours` in
-   `~/.aiida/aiida_mpds_monitor/conf.yaml` to enable long-running calculation alerts.
-   Statistics are enabled by the credentials even when the limit is `null`.
-   You can also put the credentials in
-   this file instead of using environment variables:
-
-```yaml
-telegram_bot_token: "<token-from-BotFather>"
-telegram_chat_id: "<shared-group-chat-id>"
-running_alert_hours: 24
-notification_time: "09:00"       # Daily report time, HH:MM (24-hour clock)
-notification_timezone: "UTC"    # IANA timezone, e.g. Europe/Berlin
-notification_user_names:
-  "alice@example.org": "@alice"
-  "bob@example.org": "Bob Smith (@bob)"
-```
-
-6. Start or restart the daemon with the configured service environment:
+Start continuous monitoring:
 
 ```bash
 aiida-mpds-monitor --logging-level INFO
 ```
 
-All users use the same bot token and group chat ID. Separate monitor instances
-for separate AiiDA profiles may share these credentials: the monitor only sends
-messages and does not consume Telegram updates. Run one monitor per AiiDA
-profile to avoid duplicate reports for the same calculations.
+Give monitored child workchains a label such as `HgI2/137: Geometry optimization`. The monitor uses labels as webhook payloads and skips status delivery for unlabeled workchains. Compound filters also read the formula at the beginning of the label.
 
-### Identifying calculation owners
+## Usage
 
-Keys in `notification_user_names` are the email addresses of the calculations'
-AiiDA owners (`node.user.email`). Values are the names to display in the shared
-chat; use `@username` for a Telegram username. Use `verdi user list` in the
-monitored profile to find the owner email addresses.
+### Monitor workflows
 
-For a monitor whose calculations belong to one person, you can set a default
-Telegram username instead:
-
-```yaml
-notification_user_name: "@alice"
+```bash
+aiida-mpds-monitor --logging-level INFO
 ```
 
-The singular `notification_user_name` setting also accepts a bare username such
-as `"alice"` and adds `@` automatically. It applies to **every unmapped owner**
-in this monitor. Entries in the plural `notification_user_names` mapping take
-priority; keep using that mapping for profiles with multiple owners. Mapped
-values are used verbatim, so include `@` when specifying a Telegram username.
-Use the actual Telegram username, not just a profile display name. YAML edits
-take effect on the next polling cycle.
+The daemon scans the default AiiDA profile at the configured polling interval. It checks the configured hierarchy, sends status webhooks, and uploads eligible archives. AiiDA extras track completed deliveries to avoid duplicates.
 
-If neither a mapping nor a default name is set, the report uses the owner's AiiDA
-first and last name, falling back to their email address. When several people submit under the
-same AiiDA account, the monitor sees one owner; the mapping cannot distinguish
-those people without separate ownership information.
+| Option | Behavior |
+| --- | --- |
+| `--dry-run` | Scan and log without HTTP requests or AiiDA extra updates. |
+| `--no-commit` | Send results without updating AiiDA extras. |
+| `--resend-all` | Scan eligible parents once, including processed parents, then exit. Respect successful delivery markers and retry deliveries without them. |
+| `--logging-level LEVEL`, `-l LEVEL` | Set `DEBUG`, `INFO`, `WARNING`, `ERROR`, or `CRITICAL`. Default: `ERROR`. |
 
-The uppercase YAML keys `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` are also
-accepted. For each setting, a nonempty environment value takes priority, followed
-by the lowercase YAML key, then the uppercase YAML key. YAML edits take effect
-on the next polling cycle. Restrict access to a file containing your token with
-`chmod 600 ~/.aiida/aiida_mpds_monitor/conf.yaml` and keep it out of version control.
+`--resend-all` still applies the configured hierarchy and monitor filters. Combine it with `--dry-run` for a single inspection scan. If you supply both `--dry-run` and `--no-commit`, the daemon uses dry-run mode.
 
-If neither setting is provided, notifications stay disabled. If only one is set,
-the daemon logs a startup warning (visible with `--logging-level WARNING` or
-more verbose). `poll_interval` controls how often the daemon scans, and
-`workchain_hierarchy` selects process types for Telegram reports:
+### Submit one parent
 
-```yaml
-poll_interval: 30
-running_alert_hours: 24  # null (default) disables long-running alerts; statistics still send
-workchain_hierarchy:
-  MPDSStructureWorkChain:
-    BaseCrystalWorkChain:
-      - CrystalParallelCalculation
+```bash
+aiida-mpds-submit 12345 --dry-run
+aiida-mpds-submit 12345 --logging-level INFO
 ```
 
-### Startup and daily schedule
+Replace `12345` with a parent WorkChain PK. This command uses the configured hierarchy and archive settings, bypasses `monitor_filters`, and leaves daemon delivery markers unchanged. It does not run the daemon's automatic CRYSTAL recovery or send Telegram reports.
 
-`notification_time` defaults to `"09:00"` and `notification_timezone` to `"UTC"`.
-Quote the time in YAML. Reports use the first successful calculation scan at or
-after the scheduled local time, so the polling interval and time spent processing
-webhooks or archives can delay delivery. Failed scans do not send partial or
-stale reports; a later successful scan can deliver the due report.
+### Test webhooks locally
 
-The startup check happens after the first successful scan. A startup before the
-scheduled time allows another report at that day's scheduled time. A startup
-at or after the scheduled time counts as that day's daily check, avoiding two
-immediate reports. Restarting the daemon intentionally performs another startup
-check.
-
-Each daily check runs once per local calendar date, even when daylight saving
-time repeats an hour. If the scheduled time is skipped by a clock change, the
-first successful scan afterward performs the check. A check with no overdue
-calculations sends statistics and consumes the day's slot: calculations crossing
-the limit later wait until the next report.
-
-`running_alert_hours` must be positive; fractional values such as `0.5` are
-supported. Only durations **strictly greater** than the limit qualify. A missing
-or invalid limit disables long-running alerts; statistics remain enabled. An invalid
-limit logs a warning. Invalid time or timezone
-settings also disable reports with a warning. YAML changes apply on the next
-polling cycle and do not trigger an extra startup report.
-
-Daily checks are remembered in memory. The next scheduled check or startup can
-report calculations that are still overdue; crossing the limit does not trigger
-an immediate message during a polling cycle.
-
-### Included calculations
-
-Reports cover running processes listed at any level of `workchain_hierarchy`
-in the monitor's AiiDA profile, including calculations executing remotely.
-Queued, completed, and unlisted processes are excluded. Telegram reports ignore
-`monitor_filters`.
-
-Calculations exceeding `running_alert_hours` appear in the detailed report.
-Each entry shows the owner, calculation name, PK, running duration, and hostname
-when available. Empty labels appear as `(label not set)`.
-
-For example:
-
-```text
-🚨 LONG-RUNNING CALCULATION 🚨
-Configured limit exceeded: 24 h
-
-User: @alice
-Name: BaMnO3/185: Geometry optimization
-PK: 123456
-Hostname: compute-17
-Running time: at least 25 h 17 min
-```
-
-At startup and each daily report time, the bot sends statistics after any overdue
-calculation details:
-
-```text
-📊 Calculation statistics (this monitor)
-User: @alice
-Allocated servers (yascheduler): 5
-RUNNING: 12
-Running longer than 24 h: 3
-```
-
-Statistics count all running processes selected by this monitor, including those
-within the time limit. They still send when no calculations are running or
-long-running alerts are disabled. Unknown durations count toward RUNNING but
-cannot count as overdue. The `User` line appears when `notification_user_name`
-is configured. Counts are not combined across monitors sharing a chat.
-
-If an archive upload fails, the next scheduled report sends a separate, one-time
-error message containing only the upload warning, HTTP status, and server
-explanation. The calculation and statistics messages stay separate. A successful
-upload before the report cancels the pending error message. For example:
-
-```text
-⚠️ Archive upload errors
-Archive upload failed (HTTP 401): Token has expired
-```
-
-`Allocated servers (yascheduler)` counts enabled servers, both busy and idle.
-yascheduler and its database dependency (`pg8000`) must be installed and
-configured in the monitor's environment. If the count cannot be retrieved, it
-shows `unavailable`; calculation reports still send. Monitors using the same
-yascheduler database report the same server inventory, so do not add their
-server counts together.
-
-Running duration uses the scheduler's start time when available. Otherwise, it
-starts when the monitor first observes the calculation running. Reports show
-**at least …** because this may be a lower bound. Normal restarts retain the
-fallback timer; `--no-commit` loses it on restart. Calculations with an unknown
-duration are omitted from the overdue details.
-
-### Delivery and failures
-
-Long reports are split into plain-text chunks of at most 2,000 characters;
-splitting can occur within a calculation entry. Statistics follow the calculation
-details; any archive upload error follows as a separate message. Send attempts
-from one monitor, including statistics and retries,
-are spaced at least 3.1 seconds apart to stay below Telegram's
-[group sending limit](https://core.telegram.org/bots/faq#my-bot-is-hitting-limits-how-do-i-avoid-this).
-Separate instances sharing the bot do not coordinate their send timing.
-
-For an explicit rate-limit rejection (HTTP status or API `error_code` 429), the
-monitor retries the rejected chunk up to twice. It accepts an integer
-`retry_after` from 0 through 60 seconds and waits at least 3.1 seconds before
-retrying. A missing, invalid, or larger delay ends that chunk's attempt with an
-ERROR; the monitor does not shorten a longer requested wait to 60 seconds.
-
-Other HTTP/network failures, invalid responses, and API rejections log an ERROR
-without a retry. A timeout may occur after Telegram has accepted the message.
-The monitor attempts subsequent chunks and the final statistics even if an
-earlier chunk fails, so receiving statistics does not confirm delivery of all
-details. The scheduled slot is consumed regardless of delivery success; failed
-messages do not trigger another attempt on each poll. Errors are visible at the
-daemon's default WARNING logging level. Notification errors redact the bot token
-while retaining Telegram's response description for diagnosis.
-
-Sending and retry waits run in the daemon loop before MPDS processing, so a
-large report can delay the next webhook/archive scan. Notification failures do
-not stop MPDS monitoring; each HTTP request uses a 10-second timeout.
-
-`--dry-run` sends no Telegram requests and writes no tracking extras.
-The one-shot `aiida-mpds-submit` command does not send Telegram messages.
-`--resend-all` retries eligible MPDS deliveries once and exits. It does not override the Telegram
-schedule. `--no-commit` keeps fallback running timers in memory; restarting in
-this mode loses those timers unless the scheduler supplies a start timestamp.
-
-## Testing with Stub Server
-
-Start a local stub that accepts webhooks and prints them:
+Start the stub in another terminal:
 
 ```bash
 aiida-mpds-stub
 ```
 
-Listens on `http://localhost:8080`.
+For this test, set `webhook_url: "http://localhost:8080"` and `send_archive: false` in the configuration. The stub prints incoming POST data and returns HTTP 200; it does not validate archives.
 
-## Architecture
+## Configuration
 
-The system uses hierarchical configuration:
+The daemon and submit command use `~/.aiida/aiida_mpds_monitor/conf.yaml`. If the file does not exist, they create it with the defaults from [config.py](aiida_mpds_monitor/config.py). Set the endpoints and a writable log path before sending results; the default log path is `/data/aiida_mpds_monitor.log`.
 
-1. **Parent workchains**: top-level workflows to monitor (configurable)
-2. **Child workchains**: expected calculations under each parent (configurable)
-3. **Grandchild checks**: validation of specific child process types (configurable)
+The daemon reloads YAML before each scan. Invalid updates produce a warning, and the daemon keeps the previous settings. Environment changes require a restart.
 
-Change the YAML config to monitor any workflow hierarchy without editing code.
+### Delivery and archives
 
-## Archive Upload and Cleanup
+| YAML key | Default | Purpose |
+| --- | --- | --- |
+| `webhook_url` | `http://localhost:8080` | Status webhook endpoint. |
+| `auth_key` | Empty | Webhook authentication fallback. Prefer `MPDS_MONITOR_KEY`. |
+| `poll_interval` | `30` | Seconds between scans. |
+| `workchain_hierarchy` | CRYSTAL hierarchy shown above | Parent → child → calculation process labels. |
+| `archive_upload_url` | Empty | Archive endpoint; see resolution order below. |
+| `archive_key` | Empty | Archive authentication fallback. |
+| `archive_bid` | Unset | Optional `bid` upload form field. |
+| `archive_schema_id` | Unset | Optional `schema_id` upload form field. |
+| `send_archive` | `true` | Enable archive generation and upload. |
+| `send_archives_all_stages_ready` | `false` | Require all selected subcalculations to succeed before initial archive generation. |
+| `archive_keep` | `false` | Keep local archives after successful uploads. Failed uploads retain the file. |
+| `archive_keep_errors` | `false` | Preserve a separate copy of each server-rejected archive, including rejected recovery retries, for inspection. |
+| `archive_errors_dir` | Empty | Directory for preserved rejected archives when `archive_keep_errors` is enabled. Empty saves beside the working archive. |
 
-After sending a webhook, the daemon and CLI build a `.7z` archive and upload it to a separate endpoint.
+Authentication and endpoint resolution:
 
-**`archive_upload_url`** sets the destination for archive uploads. Example curl equivalent:
+| Setting | Priority, highest first |
+| --- | --- |
+| Webhook key | `MPDS_MONITOR_KEY` environment variable → `auth_key` → legacy `security_key` |
+| Archive key | `MPDS_ARCHIVE_KEY` environment variable → `archive_key` → webhook key |
+| Archive URL | `archive_upload_url` → `ARCHIVE_UPLOAD_URL` environment variable → built-in MPDS upload endpoint |
 
-**`archive_keep`** controls local cleanup. Default `false`: delete the `.7z` after a successful upload. Set `true` to keep archives on disk. Failed uploads retain the archive for manual recovery regardless of this setting.
+Set `archive_upload_url` to choose the destination. Leaving both URL settings unset selects the built-in remote endpoint defined in [config.py](aiida_mpds_monitor/config.py).
 
-**`send_archive`** controls whether the daemon and CLI generate and upload archives at all. Default `true`. Set `false` to skip archive creation and upload entirely (webhooks are still sent).
+For a separate archive token:
 
-**`send_archives_all_stages_ready`** controls archive readiness. Default `false`:
-a structure is included when at least one configured subcalculation succeeds.
-Set `true` to include structures only after all configured subcalculations succeed.
+```bash
+export MPDS_ARCHIVE_KEY="<archive-key>"
+```
 
-Before creating the `.7z`, the monitor checks that the collected contents contain at least one non-empty calculation folder. With `send_archives_all_stages_ready: true`, every process below the selected base workchains must also have completed successfully (`is_finished_ok`). The number of calculation folders and their filenames are workflow-dependent. Failing an applicable check prevents archive creation and upload.
+Status webhooks use form fields `payload`, `status`, and `key`. Status values include `waiting`, `finished`, and `excepted`, with an exit-code suffix where available. Archive uploads use a multipart `file` field, optional `bid` and `schema_id` fields, and an `Authorization: Bearer` header.
 
-Copyright © 2026 Materials Platform for Data Science OÜ
+### Workflow filters
+
+Filters apply to daemon MPDS deliveries, including `--resend-all`. Manual submission and Telegram reports ignore them.
+
+```yaml
+monitor_filters:
+  created_after: "2026-08-01"
+  created_before: "2026-08-31"
+  max_age_hours: null
+  element_counts: [2, 3]
+  element_count_greater_than: null
+  compounds: []
+  elements: [Ba, Mn]
+  elements_match: any
+```
+
+| Key under `monitor_filters` | Meaning |
+| --- | --- |
+| `created_after`, `created_before` | Inclusive bounds on parent creation time. Accept dates or ISO 8601 timestamps; date bounds include the complete day. |
+| `max_age_hours` | Rolling age window. `168` selects the past seven days. Combine with `created_after` to use the stricter bound. |
+| `element_counts` | Allowed numbers of distinct elements; `[2, 3]` selects binary and ternary compounds. |
+| `element_count_greater_than` | Exclusive lower bound on the number of distinct elements. |
+| `compounds` | Exact, case-sensitive formulas at the start of workflow labels. |
+| `elements` | Element symbols to match in the leading formula. |
+| `elements_match` | Match `any` configured element, or require `all`. Default: `any`. |
+
+Enabled filters combine with AND. Empty lists and `null` disable their respective filters. Labels such as `BaPd3P/109: Geometry optimization` identify three distinct elements. Unrecognizable formulas fail enabled compound filters.
+
+### Logging
+
+| Key | Default | Purpose |
+| --- | --- | --- |
+| `log_file` | `/data/aiida_mpds_monitor.log` | Log file path. Relative paths use the working directory. |
+| `log_max_bytes` | `10485760` | Rotation threshold in bytes. |
+| `log_backup_count` | `3` | Number of rotated files to retain. |
+| `log_level` | `WARNING` | YAML logging level. The daemon's CLI setting overrides it, including the CLI default of `ERROR`. |
+
+Use `--logging-level INFO` to see routine delivery and cleanup messages.
+
+## CRYSTAL archive recovery
+
+### Automatic recovery
+
+The daemon uploads the initial archive before running local CRYSTAL validation. Recovery runs only after HTTP 422 with this server explanation:
+
+```text
+Archive validation failed: Found not a finished output
+```
+
+The validator checks `STRUCT`, `PHON`/`PHONON`, and `ELAST`/`ELASTIC` folders with `pycrystal`. Checks cover output completion, fatal runtime errors, parsed structures and energies, MPDS input settings, optional `fort.34` geometry, phonon data, and elastic tensors. Valid stages must match the elements in `STRUCT` and differ from its energy by at most 0.01 eV.
+
+Recovery follows these steps:
+
+1. Record invalid folders as `broken` or `corrupted` in a sibling `*.validation.json` report.
+2. Confirm broken outputs against the retrieved AiiDA `OUTPUT` using SHA-256.
+3. Flag confirmed failures on `CrystalParallelCalculation` nodes and their containing `BaseCrystalWorkChain` nodes through `mpds_archive_validation` extras.
+4. Remove invalid folders from a temporary archive copy, rebuild it, and retry the upload once.
+
+Calculation flags include `exclude_from_archive: true`, a reason, and original process attributes. Future archive generation skips those calculations, including with strict stage readiness enabled. Healthy calculations remain eligible. AiiDA process states, sealing, and retrieved data stay intact; the next status scan reports flagged broken bases as `excepted`.
+
+Input-policy failures and cross-stage inconsistencies do not prove that an AiiDA process failed. Unexpected parser errors, local I/O failures, or mismatched source outputs abort recovery without flagging the process.
+
+A repaired archive requires a valid `STRUCT`. Recovery also requires mappings from invalid folders to CRYSTAL calculation nodes. A second upload failure retains the cleaned archive and a checksum in `mpds_archive_recovery`; later scans retry that file without rebuilding or revalidating it. Missing or modified pending files prevent upload.
+
+`--no-commit` permits repair and upload without writing flags or delivery extras. `--dry-run` makes no upload request and cannot trigger recovery. Automatic recovery applies to the daemon; use the repair command below for standalone archives.
+
+### Check or repair an archive
+
+```bash
+# Inspect without writing files or uploading.
+aiida-mpds-repair-crystal material.7z --dry-run
+
+# Create material.clean.7z and material.clean.validation.json.
+aiida-mpds-repair-crystal material.7z
+
+# Repair a directory and upload through the configured endpoint.
+aiida-mpds-repair-crystal /path/to/material \
+  --output /path/to/material.fixed.7z \
+  --upload \
+  --config ~/.aiida/aiida_mpds_monitor/conf.yaml
+```
+
+A directory must contain one material's stage folders. An archive may include a wrapping material directory. The command preserves the source, includes validated stage folders in the result, and retains repaired archives and reports after upload. Choose a new output name if output files already exist.
+
+Standalone repair does not update AiiDA extras or daemon delivery markers. It sends an archive only with `--upload`; the server determines whether that upload replaces an existing record.
+
+| Exit code | Meaning |
+| --- | --- |
+| `0` | Successful check, build, or upload. |
+| `1` | Operational error. |
+| `2` | No uploadable structure remains. |
+| `3` | Upload failed. |
+
+### Archive storage
+
+Generated parent archives use `archives/<parent UUID>/<material>.7z` relative to the output root, which defaults to the working directory. `archive_keep: false` removes the local archive after a successful daemon or submit upload.
+
+Set `archive_keep_errors: true` to retain server-rejected archives as `<material>.rejected-<SHA256>.7z` beside the working archive. The daemon saves the original before automatic recovery replaces it, and saves the repaired archive too if the server rejects the retry. The submit CLI also preserves server-rejected archives. Identical rejected contents share one saved copy; later scans and successful uploads leave these copies intact. Network failures continue to retain the working archive for retry.
+
+Use `archive_errors_dir` to choose where these copies are saved:
+
+```yaml
+archive_keep_errors: true
+archive_errors_dir: "~/aiida-unsent-archives"
+```
+
+The directory is created automatically. Relative paths are resolved from the monitor's working directory, and `~` expands to the user's home directory. An empty value keeps the default location beside the working archive. Working archives used for upload retries remain in their original location so pending recovery records stay valid.
+
+Temporary calculation folders, intermediate archives, and generated summary files are removed after archive generation, including on failure. Successful uploads also remove the sibling validation report and empty archive directories unless `archive_keep` or `archive_keep_errors` retains the diagnostics. Failed uploads retain their working archive and report. Persistent lock files remain for coordination between local monitors. Standalone repair commands continue to retain their outputs and reports.
+
+Local daemons use a per-parent POSIX lock across generation, recovery, and upload. Locks coordinate processes using the same working directory, not monitors on different hosts. Recovery rolls back flags and restores the rejected archive on ordinary publication or database commit failures; filesystem and database changes do not form a distributed transaction.
+
+The standalone extractor rejects traversal paths, duplicate member names, links, and special files. Its default limits are 10,000 members and 20 GiB of unpacked data.
+
+## Telegram reports
+
+### Setup
+
+Create a bot with [@BotFather](https://t.me/BotFather), add it to your group, and allow it to send messages. Obtain the group chat ID through Telegram's `getUpdates` API; see the [bot setup guide](https://core.telegram.org/bots/tutorial).
+
+Set credentials in the daemon's environment:
+
+```bash
+export TELEGRAM_BOT_TOKEN="<bot-token>"
+export TELEGRAM_CHAT_ID="<group-chat-id>"
+```
+
+Add the report settings to `conf.yaml`:
+
+```yaml
+running_alert_hours: 24
+notification_time: "09:00"
+notification_timezone: "UTC"
+notification_user_names:
+  "alice@example.org": "@alice"
+  "bob@example.org": "Bob Smith"
+```
+
+Both credentials are required. Each setting resolves from its environment variable, then the lowercase YAML key (`telegram_bot_token` or `telegram_chat_id`), then the uppercase YAML alias. Restrict access to configuration files that contain credentials:
+
+```bash
+chmod 600 ~/.aiida/aiida_mpds_monitor/conf.yaml
+```
+
+`notification_user_names` maps AiiDA owner email addresses to display names. Find owners with `verdi user list`. For a profile with one owner, `notification_user_name: "@alice"` sets a fallback name for unmapped owners. Otherwise, reports use the AiiDA owner's name or email.
+
+### Schedule and contents
+
+The daemon sends a report after its first successful scan and once per day at `notification_time` in `notification_timezone`. A startup at or after that day's scheduled time counts as the daily check. Restarting the daemon triggers another startup report. YAML edits apply on the next scan without an extra startup report.
+
+Reports cover running processes listed at any level of `workchain_hierarchy`. Details include the owner, label, PK, hostname when available, and elapsed runtime for calculations exceeding `running_alert_hours`. Statistics count selected running processes, including those within the limit. `running_alert_hours: null` disables overdue details while retaining statistics.
+
+The duration threshold must be positive; fractional hours are supported. Runtime uses the scheduler's start time or the monitor's first observation as a lower bound. Normal runs persist fallback timers in AiiDA extras; `--no-commit` keeps them in memory.
+
+The allocated-server count requires configured `yascheduler` and `pg8000` installations. Reports show `unavailable` if the monitor cannot read that inventory. Instances sharing a scheduler database report the same inventory.
+
+### Send a report on demand
+
+```bash
+aiida-mpds-notify
+aiida-mpds-notify --overdue-only
+aiida-mpds-notify --config /path/to/conf.yaml
+```
+
+The default command includes details for all selected running calculations. `--overdue-only` applies the configured runtime threshold. Both send statistics without changing the daemon's schedule or sending MPDS results.
+
+### Delivery behavior
+
+Reports use plain-text chunks of up to 2,000 characters. Send attempts within one monitor are at least 3.1 seconds apart. Explicit rate-limit responses allow up to two retries per rejected chunk if `retry_after` is an integer from 0 through 60 seconds. Other failures log an error without a retry.
+
+A scheduled report consumes its slot even if delivery fails. The monitor attempts later chunks and statistics after an earlier failure. Requests and retry waits run in the daemon loop and can delay MPDS processing. Separate monitor instances do not coordinate Telegram send timing.
+
+Archive upload failures queue one error notice per failing endpoint for the next report. A successful upload clears that notice. Telegram errors do not stop MPDS monitoring. The bot sends reports; it does not handle chat commands or completion alerts.
+
+Run one monitor per AiiDA profile to avoid duplicate reports. Separate profiles may share a bot and chat.
+
+## Contributing
+
+Install the development dependencies, then run the tests:
+
+```bash
+python -m pip install -e '.[dev]'
+python -m pytest
+```
+
+The suite uses mocks and temporary AiiDA storage. Pytest writes terminal coverage and an HTML report in `htmlcov/`. The repository has no configured lint or type-check command.
+
+Keep changes focused, add tests for behavior changes, and update configuration examples when settings change. Review status handling, webhook fields, and archive layout against the MPDS backend contract. See [AGENTS.md](AGENTS.md) for repository conventions.
+
+## License
+
+[MIT](LICENSE). Copyright © 2026 Materials Platform for Data Science OÜ.

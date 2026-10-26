@@ -1,3 +1,6 @@
+from typing import Any
+
+
 # Status constants
 STATUS_EXC = "excepted"
 STATUS_DONE = "finished"
@@ -6,6 +9,23 @@ STATUS_WAITING = "waiting"
 EXTRA_PARENT_PROCESSED = "webhook_parent_processed"
 EXTRA_INPROGRESS_SENT = "webhook_inprogress_sent"
 EXTRA_ARCHIVE_PROCESSED = "webhook_archive_processed"
+EXTRA_ARCHIVE_RECOVERY = "mpds_archive_recovery"
+
+EXTRA_VALIDATION = "mpds_archive_validation"
+
+
+def excluded_from_archive(node: Any) -> bool:
+    """Honor CRYSTAL validation exclusions without importing the output parser."""
+    if getattr(node, "process_label", None) != "CrystalParallelCalculation":
+        return False
+    base = getattr(node, "base", None)
+    if base is None:
+        return False
+    record = base.extras.get(EXTRA_VALIDATION, None)
+    return isinstance(record, dict) and (
+        record.get("status") in ("broken", "corrupted")
+        and record.get("exclude_from_archive") is True
+    )
 
 
 def check_child_calculation(base_node, child_types=None, logger=None):
@@ -60,7 +80,10 @@ def get_child_calculations(base_node, child_types=None):
 
 def base_has_ready_children(base_node, child_types=None, all_stages_ready=False):
     """Return whether a base structure has enough successful child calculations."""
-    child_calcs = get_child_calculations(base_node, child_types)
+    child_calcs = [
+        calc for calc in get_child_calculations(base_node, child_types)
+        if not excluded_from_archive(calc)
+    ]
     if not child_calcs:
         return False
 
@@ -76,6 +99,14 @@ def get_node_status(node, child_types=None, logger=None):
     """Determine the status of an AiiDA node."""
     if child_types is None:
         child_types = ["CrystalParallelCalculation"]
+
+    if getattr(node, "process_label", None) in (
+        "BaseCrystalWorkChain", "CrystalParallelCalculation",
+    ):
+        base = getattr(node, "base", None)
+        record = base.extras.get(EXTRA_VALIDATION, None) if base is not None else None
+        if isinstance(record, dict) and record.get("status") == "broken":
+            return STATUS_EXC
 
     state = node.process_state.value
 

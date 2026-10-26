@@ -110,6 +110,13 @@ def test_generate_parent_archive_creates_named_root(mock_load_node, mock_archive
             expected_archive_root, aiida=True, skip_errors=True
         )
         assert not (tmp_root / parent_uuid).exists()
+        # Two parents with the same material label must retain separate archives.
+        with patch("aiida_mpds_monitor.generate_archive.CalcJobNode", DummyCalcJobNode):
+            second_archive = generate_parent_archive(
+                "another-parent", base_nodes=[child], tmp_root=tmp_root
+            )
+        assert second_archive is not None and second_archive != archive_path
+        assert archive_path.exists() and second_archive.exists()
 
 
 @pytest.mark.parametrize("input_filename", ["INPUT", "main.d12"])

@@ -17,6 +17,12 @@ from tests.test_crystal_repair import OUTPUT, parsed, stage
 DETAIL = "Archive validation failed: Found not a finished output"
 
 
+@pytest.fixture(autouse=True)
+def publishable_results_for_delivery_tests(monkeypatch):
+    """These delivery/recovery tests mock generation; eligibility has its own tests."""
+    monkeypatch.setattr(daemon, "has_publishable_results", lambda *_: True)
+
+
 @pytest.mark.parametrize("no_commit", [False, True])
 def test_validation_flags_preserve_process_state_and_sealing(nodes, no_commit):
     parent, base, good, bad = nodes

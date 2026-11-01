@@ -9,6 +9,13 @@ from tests.test_generate_archive import (
 )
 
 
+@pytest.fixture(autouse=True)
+def publishable_results_for_delivery_tests(monkeypatch):
+    """These delivery/recovery tests mock generation; eligibility has its own tests."""
+    monkeypatch.setattr(daemon, "has_publishable_results", lambda *_: True)
+    monkeypatch.setattr(submit, "has_publishable_results", lambda *_: True)
+
+
 def test_rejected_copies_survive_rebuilds_and_deduplicate(tmp_path):
     archive = tmp_path / "material.7z"
     archive.write_bytes(b"first rejected archive")

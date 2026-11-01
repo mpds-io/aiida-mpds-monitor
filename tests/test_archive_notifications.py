@@ -9,6 +9,12 @@ from aiida_mpds_monitor import daemon
 from aiida_mpds_monitor.config import DEFAULT_CONFIG
 
 
+@pytest.fixture(autouse=True)
+def publishable_results_for_delivery_tests(monkeypatch):
+    """These delivery/recovery tests mock generation; eligibility has its own tests."""
+    monkeypatch.setattr(daemon, "has_publishable_results", lambda *_: True)
+
+
 @pytest.mark.parametrize("telegram_fails", [False, True])
 def test_loop_sends_upload_error_as_separate_message_once(telegram_fails, tmp_path):
     notifier = MagicMock()

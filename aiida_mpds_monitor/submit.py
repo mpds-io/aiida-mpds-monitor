@@ -7,7 +7,7 @@ from aiida.orm import WorkChainNode, load_node
 
 from .config import get_archive_key, get_auth_key, load_config, resolve_archive_upload_url
 from .archive_files import cleanup_uploaded_archive, preserve_rejected_archive
-from .generate_archive import generate_parent_archive
+from .generate_archive import generate_parent_archive, has_publishable_results
 from .status import (
     base_has_ready_children,
     get_node_status,
@@ -143,6 +143,9 @@ def submit_parent(
             or not all_stages_ready
         )
         if not archive_ready:
+            return
+        if not has_publishable_results(parent_node, archive_base_nodes):
+            print(f"Nothing to publish for parent {parent_pk}: no successful calculation beyond input generation")
             return
         print(f"Generating parent archive for {parent_pk}...")
         archive_path = generate_parent_archive(

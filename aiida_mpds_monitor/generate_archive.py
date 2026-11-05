@@ -137,6 +137,25 @@ def _safe_dir_name(name: str) -> str:
     return result
 
 
+def _copy_retrieved(folder: Any, destination: Path) -> List[str]:
+    """Copy the complete repository tree; propagate errors to abort publication."""
+    repository = getattr(getattr(folder, "base", None), "repository", folder)
+    names = folder.list_object_names()
+    if hasattr(repository, "walk"):
+        for directory, directories, files in repository.walk():
+            target = destination / directory
+            target.mkdir(parents=True, exist_ok=True)
+            for name in files:
+                relative = str(Path(directory) / name)
+                with repository.open(relative, "rb") as source, (target / name).open("wb") as dest:
+                    shutil.copyfileobj(source, dest)
+    else:
+        for name in names:
+            with folder.open(name, "rb") as source, (destination / name).open("wb") as dest:
+                shutil.copyfileobj(source, dest)
+    return names
+
+
 def _copy_calculation_input(
     calculation: Any, destination: Path, retrieved_names: Iterable[str]
 ) -> bool:
@@ -289,10 +308,7 @@ def generate_archive(
     try:
         # Copy all files from retrieved folder
         try:
-            names = repo_folder.list_object_names()
-            for name in names:
-                with repo_folder.open(name, "rb") as src, (calc_dir / name).open("wb") as dst:
-                    shutil.copyfileobj(src, dst)
+            names = _copy_retrieved(repo_folder, calc_dir)
         except Exception as e:
             print(f"Error copying files for {uuid}: {e}")
             return None
@@ -312,19 +328,6 @@ def generate_archive(
             if params:
                 with (calc_dir / "INPUT.json").open("w") as f:
                     json.dump(params, f, indent=2, default=str)
-        except Exception:
-            pass
-
-        # Ensure OUTPUT or scheduler stderr is present in the archive
-        try:
-            names = repo_folder.list_object_names()
-            if "OUTPUT" in names:
-                with repo_folder.open("OUTPUT", "rb") as src, (calc_dir / "OUTPUT").open("wb") as dst:
-                    shutil.copyfileobj(src, dst)
-            elif "_scheduler-stderr.txt" in names:
-                with repo_folder.open("_scheduler-stderr.txt", "rb") as src:
-                    with (calc_dir / "_scheduler-stderr.txt").open("wb") as dst:
-                        shutil.copyfileobj(src, dst)
         except Exception:
             pass
 
@@ -384,7 +387,7 @@ def generate_parent_archive(
     if base_nodes is None:
         base_nodes = parent_subnodes
 
-    if not base_nodes:
+    if not base_nodes and not any(isinstance(node, CalcJobNode) for node in parent_subnodes):
         print(f"No child nodes found for parent {parent_uuid}")
         return None
 
@@ -453,7 +456,7 @@ def generate_parent_archive(
                     f"Warning: Could not access retrieved folder for {label_} "
                     f"{calculation.pk}: {e}"
                 )
-                continue
+                return None
 
             if not names:
                 continue
@@ -468,16 +471,11 @@ def generate_parent_archive(
             calculation_dir.mkdir(parents=True, exist_ok=True)
             if stage_nodes is not None:
                 stage_nodes[label_str] = calculation
-            for name in names:
-                try:
-                    with repo_folder.open(name, "rb") as src:
-                        with (calculation_dir / name).open("wb") as dst:
-                            shutil.copyfileobj(src, dst)
-                except Exception as e:
-                    print(
-                        f"Warning: Could not copy {name} from {label_} "
-                        f"{calculation.pk}: {e}"
-                    )
+            try:
+                _copy_retrieved(repo_folder, calculation_dir)
+            except Exception as exc:
+                logger.warning("Could not copy retrieved results for %s: %s", calculation.pk, exc)
+                return None
 
             if not _copy_calculation_input(calculation, calculation_dir, names):
                 return None

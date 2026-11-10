@@ -256,6 +256,38 @@ Standalone repair does not update AiiDA extras or daemon delivery markers. It se
 | `2` | No uploadable structure remains. |
 | `3` | Upload failed. |
 
+### Find an archive rejected by the server
+
+For `HTTP 422: Archive validation failed: Found not a finished output`, preserve
+the rejected archive so it can be checked locally. Edit
+`~/.aiida/aiida_mpds_monitor/conf.yaml` and add or update:
+
+```yaml
+archive_keep_errors: true
+archive_errors_dir: "~/aiida-rejected-archives"
+```
+
+The daemon reads configuration changes on its next scan. These settings retain
+rejected archives from subsequent uploads; they do not recover an original
+archive that was already replaced or deleted. If the failure already happened,
+check the daemon log for the working archive path or look in the configured
+rejected-archive directory.
+
+Find a retained archive and inspect it without changing it or contacting the
+server:
+
+```bash
+find ~/aiida-rejected-archives -type f -name '*.rejected-*.7z' -print
+aiida-mpds-repair-crystal /path/to/material.rejected-SHA256.7z --dry-run
+```
+
+Replace the example path with one returned by `find`. The command prints a JSON
+validation report to the terminal. Check each stage's `status` and `reason` to
+see why its output was rejected. `--dry-run` writes no report or repaired
+archive and does not upload anything. The standalone checker needs the installed
+package and its CRYSTAL validation dependencies, but does not need an AiiDA
+profile or upload credentials for this check.
+
 ### Archive storage
 
 Generated parent archives use `archives/<parent UUID>/<material>.7z` relative to the output root, which defaults to the working directory. `archive_keep: false` removes the local archive after a successful daemon or submit upload.
@@ -324,10 +356,14 @@ The allocated-server count requires configured `yascheduler` and `pg8000` instal
 ```bash
 aiida-mpds-notify
 aiida-mpds-notify --overdue-only
+aiida-mpds-notify --server-errors
 aiida-mpds-notify --config /path/to/conf.yaml
 ```
 
-The default command includes details for all selected running calculations. `--overdue-only` applies the configured runtime threshold. Both send statistics without changing the daemon's schedule or sending MPDS results.
+The default command includes details for all selected running calculations. `--overdue-only` applies
+the configured runtime threshold. Both send statistics without changing the daemon's schedule or
+sending MPDS results. `--server-errors` also re-examines all AiiDA process nodes and sends stored
+archive-server error messages.
 
 ### Delivery behavior
 
@@ -335,7 +371,15 @@ Reports use plain-text chunks of up to 2,000 characters. Send attempts within on
 
 A scheduled report consumes its slot even if delivery fails. The monitor attempts later chunks and statistics after an earlier failure. Requests and retry waits run in the daemon loop and can delay MPDS processing. Separate monitor instances do not coordinate Telegram send timing.
 
-Archive upload failures queue one error notice per failing endpoint for the next report. A successful upload clears that notice. Telegram errors do not stop MPDS monitoring. The bot sends reports; it does not handle chat commands or completion alerts.
+Daemon archive upload errors include the affected system label and the server's specific message.
+Unless `--no-commit` is used, the daemon stores the latest server error per system on the parent
+calculation and reports a new message once; repeating the same server response does not continuously
+duplicate it. A successful daemon upload clears the stored errors for that calculation. If clearing
+the records fails, the daemon logs a warning and still treats the upload as successful; stale records
+may remain. Manual uploads through `aiida-mpds-submit` or `aiida-mpds-repair-crystal --upload` do not
+store or clear these error records. Use `aiida-mpds-notify --server-errors` to re-examine stored errors
+and send them again on demand. Telegram errors do not stop MPDS monitoring. The bot sends reports;
+it does not handle chat commands or completion alerts.
 
 Run one monitor per AiiDA profile to avoid duplicate reports. Separate profiles may share a bot and chat.
 

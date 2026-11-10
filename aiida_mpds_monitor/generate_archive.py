@@ -250,7 +250,11 @@ def _iter_archive_calculations(parent_node: Any, base_nodes: Iterable[Any]) -> I
 
 
 def has_publishable_results(parent_node: Any, base_nodes: Iterable[Any]) -> bool:
-    """Require successful retrieved results beyond input generation."""
+    """Require successful retrieved results beyond input generation.
+
+    Retrieved-file inspection errors propagate so callers can retry instead of
+    treating an unavailable repository as an empty result.
+    """
     for calculation in _iter_archive_calculations(parent_node, base_nodes):
         if excluded_from_archive(calculation):
             continue
@@ -258,12 +262,9 @@ def has_publishable_results(parent_node: Any, base_nodes: Iterable[Any]) -> bool
             continue
         if calculation.process_label in INPUT_GENERATION_PROCESS_LABELS:
             continue
-        try:
-            retrieved = getattr(calculation.outputs, "retrieved", None)
-            if retrieved is not None and retrieved.list_object_names():
-                return True
-        except Exception as exc:
-            logger.warning("Could not inspect retrieved results of %s: %s", calculation.pk, exc)
+        retrieved = getattr(calculation.outputs, "retrieved", None)
+        if retrieved is not None and retrieved.list_object_names():
+            return True
     return False
 
 
@@ -466,9 +467,14 @@ def generate_parent_archive(
                 # A retry must not inherit missing/corrupted files from an older attempt.
                 shutil.rmtree(calculation_dir)
             elif calculation_dir.exists():
-                label_str = f"{label_str}_{calculation.pk}"
+                suffixed_label = f"{label_str}_{calculation.pk}"
+                label_str = suffixed_label
+                suffix = 2
+                while (archive_root / label_str).exists():
+                    label_str = f"{suffixed_label}_{suffix}"
+                    suffix += 1
                 calculation_dir = archive_root / label_str
-            calculation_dir.mkdir(parents=True, exist_ok=True)
+            calculation_dir.mkdir(parents=True, exist_ok=False)
             if stage_nodes is not None:
                 stage_nodes[label_str] = calculation
             try:

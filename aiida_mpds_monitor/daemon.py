@@ -141,23 +141,36 @@ def generate_and_upload_archive(
 ) -> bool:
     """Generate and upload one parent archive.
 
-    A disabled archive upload is considered complete.  Otherwise ``True`` is
-    returned only after the archive has been uploaded successfully.
+    Disabled uploads and terminal parents with no publishable results count as
+    complete. Running parents and inspection failures remain pending for retry.
     """
     if not config.get("send_archive", True):
         return True
+
+    if not parent_node.is_terminated:
+        logger.debug("Parent %s is still active; archive publication deferred", parent_node.pk)
+        return False
 
     pending = (
         parent_node.base.extras.get(EXTRA_ARCHIVE_RECOVERY, None)
         if hasattr(parent_node, "base") else None
     )
     recovered_ready = isinstance(pending, dict) and pending.get("status") == "ready"
-    if not recovered_ready and not has_publishable_results(parent_node, base_nodes):
-        logger.warning(
-            "Nothing to publish for parent %s: no successful calculation beyond input generation",
-            parent_node.pk,
-        )
-        return True
+    if not recovered_ready:
+        try:
+            publishable = has_publishable_results(parent_node, base_nodes)
+        except Exception as exc:
+            logger.warning(
+                "Could not inspect results for parent %s; leaving publication pending: %s",
+                parent_node.pk, exc,
+            )
+            return False
+        if not publishable:
+            logger.warning(
+                "Nothing to publish for parent %s: no successful calculation beyond input generation",
+                parent_node.pk,
+            )
+            return True
 
     with parent_archive_lock(parent_node.uuid) as acquired:
         if not acquired:
@@ -502,7 +515,9 @@ def scan_and_process(
             elif result is None:
                 all_terminal = False
 
-        processing_complete = bool(base_nodes) and all_terminal and not any_failed
+        processing_complete = (
+            parent_node.is_terminated and bool(base_nodes) and all_terminal and not any_failed
+        )
         archive_ready = bool(archive_base_nodes) and (
             config.get("send_archives_all_stages_ready", False)
             and len(archive_base_nodes) == len(base_nodes)
@@ -634,7 +649,13 @@ def scan_and_process_dry_run(config, logger, force=False):
             status = get_node_status(base_node, child_types=grandchild_types, logger=logger)
             logger.info(f"[TEST] Would send webhook for '{label}' (status: {status})")
 
-        logger.info(f"[TEST] Would mark parent {parent_node.pk} as processed")
+        if parent_node.is_terminated:
+            logger.info(f"[TEST] Would mark parent {parent_node.pk} as processed")
+        else:
+            logger.info(
+                "[TEST] Parent %s is still active; archive publication would remain pending",
+                parent_node.pk,
+            )
 
 
 def scan_notifications(config, logger, running: RunningNotifications) -> None:

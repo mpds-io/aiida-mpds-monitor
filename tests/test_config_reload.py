@@ -10,6 +10,12 @@ from aiida_mpds_monitor import daemon
 from aiida_mpds_monitor.config import read_config
 
 
+@pytest.fixture(autouse=True)
+def publishable_results_for_delivery_tests(monkeypatch):
+    """These delivery/recovery tests mock generation; eligibility has its own tests."""
+    monkeypatch.setattr(daemon, "has_publishable_results", lambda *_: True)
+
+
 def write_config(path, **settings):
     path.write_text(yaml.safe_dump(settings))
 

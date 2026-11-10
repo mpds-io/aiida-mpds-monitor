@@ -26,7 +26,7 @@ from .filters import (
     get_time_bounds,
     matches_compound_filters,
 )
-from .generate_archive import generate_parent_archive
+from .generate_archive import generate_parent_archive, has_publishable_results
 from .notifications import create_notifier
 from .running import (
     EXTRA_RUNNING, RunningNotifications, resolve_allocated_servers, resolve_running_details,
@@ -98,6 +98,14 @@ def filter_nodes_by_element_count(
     return filtered
 
 
+def is_reported_by_caller(node, hierarchy):
+    """Leave a nested root to the monitored caller that reports its type."""
+    caller = getattr(node, "caller", None)
+    if caller is None:
+        return False
+    return node.process_label in hierarchy.get(caller.process_label, {})
+
+
 def setup_logger(config):
     logger = logging.getLogger("aiida_mpds_monitor")
     log_level = getattr(logging, config.log_level.upper())
@@ -137,6 +145,18 @@ def generate_and_upload_archive(
     returned only after the archive has been uploaded successfully.
     """
     if not config.get("send_archive", True):
+        return True
+
+    pending = (
+        parent_node.base.extras.get(EXTRA_ARCHIVE_RECOVERY, None)
+        if hasattr(parent_node, "base") else None
+    )
+    recovered_ready = isinstance(pending, dict) and pending.get("status") == "ready"
+    if not recovered_ready and not has_publishable_results(parent_node, base_nodes):
+        logger.warning(
+            "Nothing to publish for parent %s: no successful calculation beyond input generation",
+            parent_node.pk,
+        )
         return True
 
     with parent_archive_lock(parent_node.uuid) as acquired:
@@ -346,6 +366,9 @@ def scan_and_process(
     parent_rows = list(qb.iterall())
     for parent_node in parent_rows:
         parent_node = parent_node[0]
+        if is_reported_by_caller(parent_node, hierarchy):
+            logger.debug("Skipping nested root %s: its caller already reports it", parent_node.pk)
+            continue
         logger.debug(f"Processing parent workchain {parent_node.pk}")
         parent_is_broken = parent_node.is_failed or parent_node.is_excepted or parent_node.is_killed
         called_nodes = parent_node.called
@@ -537,6 +560,9 @@ def scan_and_process_dry_run(config, logger, force=False):
 
     for parent_node in qb.iterall():
         parent_node = parent_node[0]
+        if is_reported_by_caller(parent_node, hierarchy):
+            logger.debug("[TEST] Would skip nested root %s", parent_node.pk)
+            continue
         logger.debug(f"[TEST] Would process parent {parent_node.pk}")
 
         parent_is_broken = parent_node.is_failed or parent_node.is_excepted or parent_node.is_killed

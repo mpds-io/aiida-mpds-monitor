@@ -246,3 +246,64 @@ def test_single_archive_falls_back_to_repository_input(tmp_path):
         "aiida_mpds_monitor.generate_archive.archive_and_save", side_effect=inspect_archive
     ):
         assert generate_archive("calc", tmp_root=tmp_path / "tmp") is not None
+
+@pytest.mark.parametrize('parent_mode', [False, True])
+@pytest.mark.parametrize('nested', [False, True])
+@pytest.mark.parametrize('broken', [False, True])
+def test_complete_retrieved_copy(tmp_path, monkeypatch, parent_mode, nested, broken):
+    from aiida_mpds_monitor import generate_archive as module
+    from io import BytesIO
+
+    filename = 'OUT.aiida/running_scf.log' if nested else 'OUTPUT'
+    files = {'INPUT': b'input', filename: b'converged'}
+
+    class Repository:
+        def list_object_names(self):
+            return ['INPUT', 'OUT.aiida' if nested else 'OUTPUT']
+
+        def walk(self):
+            if nested:
+                yield '', ['OUT.aiida'], ['INPUT']
+                yield 'OUT.aiida', [], ['running_scf.log']
+            else:
+                yield '', [], ['INPUT', 'OUTPUT']
+
+        def open(self, name, mode):
+            if broken and name == filename:
+                raise OSError('copy failed')
+            return BytesIO(files[name])
+
+    calc = DummyCalcJobNode(uuid='calc', pk=1, retrieved=Repository())
+    parent = DummyProcessNode(uuid='parent', called=[calc])
+    monkeypatch.setattr(module, 'CalcJobNode', DummyCalcJobNode)
+    monkeypatch.setattr(module, 'load_node', lambda uuid: parent if parent_mode else calc)
+    compressed = []
+
+    def compress(source, **kwargs):
+        calculation_dir = source / 'DummyCalcJobNode' if parent_mode else source
+        assert (calculation_dir / filename).read_bytes() == b'converged'
+        assert (calculation_dir / 'INPUT').read_bytes() == b'input'
+        compressed.append(source)
+        return _fake_archive_and_save(source)
+
+    monkeypatch.setattr(module, 'archive_and_save', compress)
+    result = (module.generate_parent_archive('parent', base_nodes=[], tmp_root=tmp_path / 'stage')
+              if parent_mode else module.generate_archive('calc', tmp_root=tmp_path / 'stage'))
+    assert (result is None) is broken
+    assert bool(compressed) is not broken
+
+
+def test_copy_real_aiida_repository(tmp_path):
+    from io import BytesIO
+    from aiida.orm import FolderData
+    from aiida.storage.sqlite_temp import SqliteTempBackend
+    from aiida_mpds_monitor.generate_archive import _copy_retrieved
+
+    backend = SqliteTempBackend(SqliteTempBackend.create_profile())
+    try:
+        folder = FolderData(backend=backend)
+        folder.base.repository.put_object_from_filelike(BytesIO(b'log'), 'OUT.aiida/deep/running_scf.log')
+        _copy_retrieved(folder, tmp_path)
+        assert (tmp_path / 'OUT.aiida/deep/running_scf.log').read_bytes() == b'log'
+    finally:
+        backend.close()

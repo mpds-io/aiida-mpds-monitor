@@ -383,6 +383,20 @@ it does not handle chat commands or completion alerts.
 
 Run one monitor per AiiDA profile to avoid duplicate reports. Separate profiles may share a bot and chat.
 
+### Archive eligibility and phonon layouts
+
+Only successful calculations with retrieved files are published. Omitted failures
+are logged with their process state and exit status; archives contain no failure
+manifest. Input generation alone is not a publishable result, and a parent with
+nothing to publish is considered complete to avoid rebuilding it on every scan.
+Already recovered archives remain eligible for upload.
+
+Phonon archives include the parent's own CalcJobs, such as the force-constant
+calculation. Unlabelled calculations use their process label. Repeated labels
+receive a PK suffix, while CRYSTAL retries continue replacing the same stage.
+A workflow configured both as a root and as a child of its monitored caller is
+reported through that caller only.
+
 ## Contributing
 
 Install the development dependencies, then run the tests:

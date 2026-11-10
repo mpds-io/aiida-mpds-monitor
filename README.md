@@ -389,11 +389,16 @@ Only successful calculations with retrieved files are published. Omitted failure
 are logged with their process state and exit status; archives contain no failure
 manifest. Input generation alone is not a publishable result, and a parent with
 nothing to publish is considered complete to avoid rebuilding it on every scan.
-Already recovered archives remain eligible for upload.
+The daemon waits until the parent workflow reaches a terminal state before
+publishing its archive or marking publication complete, so parent-owned results
+are included. Errors inspecting retrieved files leave publication pending for
+retry on a later scan. Already recovered archives remain eligible for upload
+without rechecking source eligibility.
 
 Phonon archives include the parent's own CalcJobs, such as the force-constant
 calculation. Unlabelled calculations use their process label. Repeated labels
-receive a PK suffix, while CRYSTAL retries continue replacing the same stage.
+receive a PK suffix, with an additional numeric suffix if needed to avoid another
+collision, while CRYSTAL retries continue replacing the same stage.
 A workflow configured both as a root and as a child of its monitored caller is
 reported through that caller only.
 

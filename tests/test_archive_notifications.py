@@ -27,10 +27,18 @@ def test_loop_sends_upload_error_as_separate_message_once(telegram_fails, tmp_pa
         scans += 1
         if scans == 3:
             raise KeyboardInterrupt
-        # Multiple parents and polling attempts must share one error notice.
+        # Repeated responses for the same calculations should not be requeued.
         for pk in (1, 2, 3):
+            extras = {}
+            parent = SimpleNamespace(
+                pk=pk, uuid=str(pk),
+                base=SimpleNamespace(extras=SimpleNamespace(
+                    get=extras.get, set=lambda key, value: extras.__setitem__(key, value),
+                    delete=lambda key: extras.pop(key, None),
+                )),
+            )
             assert not daemon.generate_and_upload_archive(
-                SimpleNamespace(pk=pk, uuid=str(pk)), [], config, logger,
+                parent, [SimpleNamespace(label=f"System {pk}")], config, logger,
                 archive_errors=options["archive_errors"],
             )
 
@@ -50,13 +58,14 @@ def test_loop_sends_upload_error_as_separate_message_once(telegram_fails, tmp_pa
     assert len(messages) == 4
     assert all("📊 Calculation statistics" in messages[index] for index in (0, 1, 3))
     assert all("Archive upload errors" not in messages[index] for index in (0, 1, 3))
-    assert messages[2] == (
-        "⚠️ Archive upload errors\n"
-        "Archive upload failed (HTTP 401): Token has expired"
-    )
+    assert messages[2].startswith("⚠️ Archive upload errors\n")
+    for pk in (1, 2, 3):
+        assert f"System: System {pk}" in messages[2]
+        assert f"Calculation PK: {pk}" in messages[2]
+    assert messages[2].count("Token has expired") == 3
 
 
-def test_disabled_telegram_does_not_create_upload_error_tracker():
+def test_disabled_telegram_still_tracks_server_errors():
     config = AttributeDict(DEFAULT_CONFIG)
     logger = MagicMock()
     with patch.object(daemon, "create_notifier", return_value=None), patch.object(
@@ -65,8 +74,10 @@ def test_disabled_telegram_does_not_create_upload_error_tracker():
         daemon, "scan_and_process", side_effect=KeyboardInterrupt
     ) as scan:
         daemon.run_monitor_loop(config, logger)
-    errors.assert_not_called()
-    scan.assert_called_once_with(config, logger, no_commit=False, force=False)
+    errors.assert_called_once_with()
+    scan.assert_called_once_with(
+        config, logger, no_commit=False, force=False, archive_errors=errors.return_value,
+    )
 
 
 def test_loop_drops_expired_token_notice_after_successful_upload(monkeypatch, tmp_path):

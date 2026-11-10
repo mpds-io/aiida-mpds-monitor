@@ -33,7 +33,9 @@ def test_resend_all_scans_once_and_exits_without_sleep(tmp_path, dry_run, no_com
         dry_scan.assert_called_once_with(config, ANY, force=True)
         scan.assert_not_called()
     else:
-        scan.assert_called_once_with(config, ANY, no_commit=no_commit, force=True)
+        scan.assert_called_once_with(
+            config, ANY, no_commit=no_commit, force=True, archive_errors=ANY,
+        )
         dry_scan.assert_not_called()
     sleep.assert_not_called()
 

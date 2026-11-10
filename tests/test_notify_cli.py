@@ -112,6 +112,56 @@ def test_empty_scan_sends_no_calculations_notice_and_statistics(tmp_path):
     assert "unavailable" in texts[1]
 
 
+def test_server_errors_option_reexamines_and_sends_stored_errors(tmp_path):
+    config = config_file(tmp_path)
+    with patch("aiida_mpds_monitor.notify.load_profile"), patch(
+        "aiida_mpds_monitor.notify.scan_notifications",
+        side_effect=lambda config, logger, running: running.finish_scan(),
+    ), patch(
+        "aiida_mpds_monitor.notify.scan_archive_server_errors",
+        return_value="⚠️ Archive upload errors\nSystem: BaMnO3\nInvalid structure",
+    ) as scan_errors, patch(
+        "aiida_mpds_monitor.notify.resolve_allocated_servers", return_value=5
+    ), patch(
+        "aiida_mpds_monitor.notifications.requests.post", return_value=response()
+    ) as post, patch("aiida_mpds_monitor.notifications.time.sleep"):
+        assert main(["--config", str(config), "--server-errors"]) == 0
+
+    scan_errors.assert_called_once_with()
+    texts = [call.kwargs["json"]["text"] for call in post.call_args_list]
+    assert len(texts) == 3
+    assert any("System: BaMnO3" in text and "Invalid structure" in text for text in texts)
+
+
+def test_scan_archive_server_errors_reads_all_stored_nodes():
+    from aiida_mpds_monitor import daemon
+    from aiida_mpds_monitor.webhook import EXTRA_ARCHIVE_SERVER_ERRORS
+
+    def node(pk, records):
+        return SimpleNamespace(
+            pk=pk,
+            base=SimpleNamespace(extras=SimpleNamespace(
+                get=lambda key, default=None: records if key == EXTRA_ARCHIVE_SERVER_ERRORS
+                else default,
+            )),
+        )
+
+    query = MagicMock()
+    query.iterall.return_value = iter([
+        (node(12, [{"system": "BaMnO3", "message": "Invalid structure"}]),),
+        (node(34, [{"system": "Si", "message": "Output is missing"}]),),
+    ])
+    with patch.object(daemon, "QueryBuilder", return_value=query):
+        report = daemon.scan_archive_server_errors()
+
+    query.append.assert_called_once_with(
+        daemon.ProcessNode,
+        filters={"extras": {"has_key": EXTRA_ARCHIVE_SERVER_ERRORS}},
+    )
+    assert "System: BaMnO3\nCalculation PK: 12\nInvalid structure" in report
+    assert "System: Si\nCalculation PK: 34\nOutput is missing" in report
+
+
 def test_env_credentials_override_yaml(tmp_path, monkeypatch):
     config = config_file(tmp_path)
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "env-token")

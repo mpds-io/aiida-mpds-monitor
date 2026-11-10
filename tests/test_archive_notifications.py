@@ -37,7 +37,7 @@ def test_loop_sends_upload_error_as_separate_message_once(telegram_fails, tmp_pa
         for pk in (1, 2, 3):
             extras = {}
             parent = SimpleNamespace(
-                pk=pk, uuid=str(pk),
+                pk=pk, uuid=str(pk), is_terminated=True,
                 base=SimpleNamespace(extras=SimpleNamespace(
                     get=extras.get, set=lambda key, value: extras.__setitem__(key, value),
                     delete=lambda key: extras.pop(key, None),
@@ -106,7 +106,7 @@ def test_loop_drops_expired_token_notice_after_successful_upload(monkeypatch, tm
             # Simulate changing this process's environment, not a parent shell's.
             monkeypatch.setenv("MPDS_ARCHIVE_KEY", "new-token")
         uploaded = daemon.generate_and_upload_archive(
-            SimpleNamespace(pk=1, uuid="1"), [], config, logger,
+            SimpleNamespace(pk=1, uuid="1", is_terminated=True), [], config, logger,
             archive_errors=options["archive_errors"],
         )
         assert uploaded is (scans == 2)

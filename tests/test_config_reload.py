@@ -163,7 +163,7 @@ def test_loop_rotates_yaml_archive_key_and_poll_interval_without_restart(tmp_pat
             raise KeyboardInterrupt
         trackers.append(options["archive_errors"])
         uploaded = daemon.generate_and_upload_archive(
-            SimpleNamespace(pk=1, uuid="1"), [], config, logger,
+            SimpleNamespace(pk=1, uuid="1", is_terminated=True), [], config, logger,
             archive_errors=options["archive_errors"],
         )
         assert uploaded is (scans == 2)

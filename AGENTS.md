@@ -166,6 +166,16 @@ aiida-mpds-submit 12345 --dry-run
 
 ## Extensibility Hooks
 
+- Archive eligibility is checked by `has_publishable_results`: successful
+  retrieved results beyond input generation are required. A parent with no such
+  results counts as complete without an upload; ready recovered archives bypass
+  this source check.
+- Parent-owned CalcJobs and unlabelled phonon results are included. Non-CRYSTAL
+  label collisions receive a PK suffix; preserve CRYSTAL retry replacement,
+  archive locking, and recovery behavior when changing this code.
+- Failed calculations stay out of archives and are reported in logs only.
+- `is_reported_by_caller` prevents duplicate reporting of nested monitored roots.
+
 - **`workchain_hierarchy`** in `conf.yaml` -- declarative map of parent → child
   → grandchild labels. Add a new hierarchy by editing config only.
 - **Environment variables**:

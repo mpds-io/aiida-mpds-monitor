@@ -39,7 +39,9 @@ def test_resend_all_scans_once_and_exits_without_sleep(tmp_path, dry_run, no_com
         dry_scan.assert_called_once_with(config, ANY, force=True)
         scan.assert_not_called()
     else:
-        scan.assert_called_once_with(config, ANY, no_commit=no_commit, force=True)
+        scan.assert_called_once_with(
+            config, ANY, no_commit=no_commit, force=True, archive_errors=ANY,
+        )
         dry_scan.assert_not_called()
     sleep.assert_not_called()
 
@@ -161,7 +163,7 @@ def test_loop_rotates_yaml_archive_key_and_poll_interval_without_restart(tmp_pat
             raise KeyboardInterrupt
         trackers.append(options["archive_errors"])
         uploaded = daemon.generate_and_upload_archive(
-            SimpleNamespace(pk=1, uuid="1"), [], config, logger,
+            SimpleNamespace(pk=1, uuid="1", is_terminated=True), [], config, logger,
             archive_errors=options["archive_errors"],
         )
         assert uploaded is (scans == 2)

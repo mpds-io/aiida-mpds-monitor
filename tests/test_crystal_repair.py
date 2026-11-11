@@ -243,7 +243,9 @@ def test_monitor_checks_stages_and_uploads_only_clean_archive(tmp_path, parser, 
             process_label="CrystalParallelCalculation", outputs=SimpleNamespace(retrieved=retrieved),
         ))
     child = SimpleNamespace(uuid="child", pk=100, called=nodes, process_label="BaseCrystalWorkChain")
-    parent = SimpleNamespace(pk=42, uuid="parent", label="NaCl", called=[child])
+    parent = SimpleNamespace(
+        pk=42, uuid="parent", label="NaCl", called=[child], is_terminated=True,
+    )
     marks = {}
     extras = MagicMock()
     extras.get.side_effect = lambda key, default=None: marks.get(key, default)

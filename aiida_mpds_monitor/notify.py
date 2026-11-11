@@ -10,7 +10,7 @@ import yaml
 from aiida import load_profile
 
 from .config import DEFAULT_CONFIG, DEFAULT_CONFIG_PATH, read_config
-from .daemon import scan_notifications
+from .daemon import scan_archive_server_errors, scan_notifications
 from .notifications import create_notifier
 from .running import RunningNotifications, resolve_allocated_servers
 
@@ -28,6 +28,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument(
         "--overdue-only", action="store_true",
         help="Include calculation details only above running_alert_hours, like scheduled reports.",
+    )
+    parser.add_argument(
+        "--server-errors", action="store_true",
+        help="Re-examine stored archive-server errors for all calculations and report them.",
     )
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.WARNING, format="%(levelname)s: %(message)s")
@@ -57,10 +61,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         running.begin_scan()
         scan_notifications(config, logger, running)
         details = running.overdue_report() if args.overdue_only else running.report()
+        server_errors = scan_archive_server_errors() if args.server_errors else None
         statistics = running.statistics_report(resolve_allocated_servers(logger))
         details_sent = notifier.send_message(details) if details else True
+        errors_sent = notifier.send_message(server_errors) if server_errors else True
         statistics_sent = notifier.send_message(statistics)
-        return 0 if details_sent and statistics_sent else 1
+        return 0 if details_sent and errors_sent and statistics_sent else 1
     except Exception as exc:
         # Profile, database, or provider exception text may contain credentials.
         print(f"Could not send calculation report ({type(exc).__name__})", file=sys.stderr)

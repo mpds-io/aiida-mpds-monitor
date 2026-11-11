@@ -138,7 +138,8 @@ def test_preservation_failure_prevents_destructive_recovery(tmp_path, monkeypatc
         "aiida_mpds_monitor.crystal_recovery.recover_archive"
     ) as recover:
         assert not daemon.generate_and_upload_archive(
-            SimpleNamespace(pk=1, uuid="parent"), [], {"archive_keep_errors": True}, MagicMock()
+            SimpleNamespace(pk=1, uuid="parent", is_terminated=True), [],
+            {"archive_keep_errors": True}, MagicMock()
         )
     recover.assert_not_called()
     assert archive.read_bytes() == b"rejected"

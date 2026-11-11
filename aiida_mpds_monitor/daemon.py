@@ -41,7 +41,10 @@ from .status import (
     STATUS_WAITING,
     get_node_status,
 )
-from .webhook import ArchiveUploadErrors, ArchiveUploadResult, send_webhook, send_archive
+from .webhook import (
+    EXTRA_ARCHIVE_SERVER_ERRORS, ArchiveUploadErrors, ArchiveUploadResult, send_webhook,
+    send_archive,
+)
 
 
 def filter_nodes_by_element_count(
@@ -138,23 +141,36 @@ def generate_and_upload_archive(
 ) -> bool:
     """Generate and upload one parent archive.
 
-    A disabled archive upload is considered complete.  Otherwise ``True`` is
-    returned only after the archive has been uploaded successfully.
+    Disabled uploads and terminal parents with no publishable results count as
+    complete. Running parents and inspection failures remain pending for retry.
     """
     if not config.get("send_archive", True):
         return True
+
+    if not parent_node.is_terminated:
+        logger.debug("Parent %s is still active; archive publication deferred", parent_node.pk)
+        return False
 
     pending = (
         parent_node.base.extras.get(EXTRA_ARCHIVE_RECOVERY, None)
         if hasattr(parent_node, "base") else None
     )
     recovered_ready = isinstance(pending, dict) and pending.get("status") == "ready"
-    if not recovered_ready and not has_publishable_results(parent_node, base_nodes):
-        logger.warning(
-            "Nothing to publish for parent %s: no successful calculation beyond input generation",
-            parent_node.pk,
-        )
-        return True
+    if not recovered_ready:
+        try:
+            publishable = has_publishable_results(parent_node, base_nodes)
+        except Exception as exc:
+            logger.warning(
+                "Could not inspect results for parent %s; leaving publication pending: %s",
+                parent_node.pk, exc,
+            )
+            return False
+        if not publishable:
+            logger.warning(
+                "Nothing to publish for parent %s: no successful calculation beyond input generation",
+                parent_node.pk,
+            )
+            return True
 
     with parent_archive_lock(parent_node.uuid) as acquired:
         if not acquired:
@@ -200,6 +216,10 @@ def _generate_and_upload_archive(
         return False
 
     logger.info(f"Generated archive for parent {parent_node.pk}: {archive_path}")
+    system_labels = [
+        base.label.strip() for base in base_nodes
+        if isinstance(getattr(base, "label", None), str) and base.label.strip()
+    ]
     try:
         upload_url = resolve_archive_upload_url(config, logger=logger)
         result = ArchiveUploadResult()
@@ -210,6 +230,8 @@ def _generate_and_upload_archive(
             schema_id=config.get("archive_schema_id"),
             key=get_archive_key(config),
             result=result,
+            system_labels=system_labels,
+            error_node=parent_node if hasattr(parent_node, "base") and not no_commit else None,
             **({"errors": archive_errors} if archive_errors is not None else {}),
         )
         if (not uploaded and result.status_code is not None
@@ -228,6 +250,8 @@ def _generate_and_upload_archive(
                     upload_url, repaired, bid=config.get("archive_bid"),
                     schema_id=config.get("archive_schema_id"), key=get_archive_key(config),
                     result=result,
+                    system_labels=system_labels,
+                    error_node=parent_node if hasattr(parent_node, "base") and not no_commit else None,
                     **({"errors": archive_errors} if archive_errors is not None else {}),
                 )
                 if (not uploaded and result.status_code is not None
@@ -491,7 +515,9 @@ def scan_and_process(
             elif result is None:
                 all_terminal = False
 
-        processing_complete = bool(base_nodes) and all_terminal and not any_failed
+        processing_complete = (
+            parent_node.is_terminated and bool(base_nodes) and all_terminal and not any_failed
+        )
         archive_ready = bool(archive_base_nodes) and (
             config.get("send_archives_all_stages_ready", False)
             and len(archive_base_nodes) == len(base_nodes)
@@ -623,7 +649,13 @@ def scan_and_process_dry_run(config, logger, force=False):
             status = get_node_status(base_node, child_types=grandchild_types, logger=logger)
             logger.info(f"[TEST] Would send webhook for '{label}' (status: {status})")
 
-        logger.info(f"[TEST] Would mark parent {parent_node.pk} as processed")
+        if parent_node.is_terminated:
+            logger.info(f"[TEST] Would mark parent {parent_node.pk} as processed")
+        else:
+            logger.info(
+                "[TEST] Parent %s is still active; archive publication would remain pending",
+                parent_node.pk,
+            )
 
 
 def scan_notifications(config, logger, running: RunningNotifications) -> None:
@@ -657,6 +689,28 @@ def scan_notifications(config, logger, running: RunningNotifications) -> None:
             hostname=details.hostname if details else None,
         )
     running.finish_scan()
+
+
+def scan_archive_server_errors() -> Optional[str]:
+    """Return stored archive-server errors from all AiiDA process nodes."""
+    qb = QueryBuilder()
+    qb.append(ProcessNode, filters={"extras": {"has_key": EXTRA_ARCHIVE_SERVER_ERRORS}})
+    notices = []
+    for (node,) in qb.iterall():
+        records = node.base.extras.get(EXTRA_ARCHIVE_SERVER_ERRORS, [])
+        if not isinstance(records, list):
+            continue
+        for record in records:
+            if not isinstance(record, dict):
+                continue
+            system = record.get("system")
+            message = record.get("message")
+            if not isinstance(system, str) or not isinstance(message, str):
+                continue
+            notices.append(f"System: {system}\nCalculation PK: {node.pk}\n{message}")
+    if not notices:
+        return None
+    return "⚠️ Archive upload errors (re-examined)\n\n" + "\n\n".join(notices)
 
 
 def reload_monitor_config(
@@ -725,7 +779,7 @@ def run_monitor_loop(
     logging overrides and notification history across configuration changes.
     """
     notifier = None if dry_run else create_notifier(config)
-    archive_errors = ArchiveUploadErrors() if notifier else None
+    archive_errors = ArchiveUploadErrors()
     running = (RunningNotifications(
         notifier, config.get("running_alert_hours"), no_commit,
         user_names=config.get("notification_user_names"),
@@ -769,8 +823,6 @@ def run_monitor_loop(
                         config.get("notification_timezone", "UTC"),
                     )
                 if notifier is not None:
-                    if archive_errors is None:
-                        archive_errors = ArchiveUploadErrors()
                     if running is None:
                         running = RunningNotifications(
                             notifier, config.get("running_alert_hours"), no_commit,
@@ -803,7 +855,7 @@ def run_monitor_loop(
                         logger.warning("Notification scan failed; continuing MPDS monitoring")
                 scan_and_process(
                     config, logger, no_commit=no_commit, force=force,
-                    **({"archive_errors": archive_errors} if notifier is not None else {}),
+                    archive_errors=archive_errors,
                 )
 
             if force:

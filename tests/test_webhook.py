@@ -3,7 +3,10 @@ from unittest.mock import MagicMock, patch
 import pytest
 import requests
 
-from aiida_mpds_monitor.webhook import ArchiveUploadErrors, send_archive, send_webhook
+from aiida_mpds_monitor.webhook import (
+    EXTRA_ARCHIVE_SERVER_ERRORS, ArchiveUploadErrors, ArchiveUploadResult,
+    send_archive, send_webhook,
+)
 
 
 class TestSendWebhook:
@@ -134,6 +137,36 @@ class TestSendWebhook:
 
 
 class TestSendArchive:
+    @pytest.mark.parametrize("failing_operation", ["get", "delete"])
+    @patch("aiida_mpds_monitor.webhook.requests.post")
+    def test_success_survives_error_record_cleanup_failure(
+        self, mock_post, tmp_path, caplog, failing_operation,
+    ):
+        archive = tmp_path / "result.7z"
+        archive.write_bytes(b"archive")
+        mock_post.return_value = MagicMock(status_code=200)
+        node = MagicMock(pk=123, uuid="parent-123")
+        node.base.extras.get.return_value = [{"system": "Si", "message": "Old error"}]
+        errors = ArchiveUploadErrors()
+        errors.failed("https://example.com/upload", "Old error", node=node)
+        getattr(node.base.extras, failing_operation).side_effect = RuntimeError(
+            "Cannot clear extras for secret:key / secret%3Akey"
+        )
+        result = ArchiveUploadResult()
+
+        assert send_archive(
+            "https://example.com/upload", archive, key="secret:key",
+            errors=errors, error_node=node, result=result,
+        )
+
+        assert result.status_code == 200
+        assert result.description == ""
+        assert errors.consume() == ""
+        mock_post.assert_called_once()
+        assert "WARNING" in caplog.text
+        assert "[REDACTED]" in caplog.text
+        assert "secret" not in caplog.text
+
     @patch("aiida_mpds_monitor.webhook.requests.post")
     def test_expired_token_notice_once_until_upload_recovers(self, mock_post, tmp_path):
         archive = tmp_path / "result.7z"
@@ -193,6 +226,26 @@ class TestSendArchive:
         assert "HTTP 502" in errors.consume()
 
     @patch("aiida_mpds_monitor.webhook.requests.post")
+    def test_structured_server_error_messages_are_preserved(self, mock_post, tmp_path):
+        archive = tmp_path / "result.7z"
+        archive.write_bytes(b"archive")
+        errors = ArchiveUploadErrors()
+        response = MagicMock(status_code=422)
+        response.json.return_value = {"detail": [
+            {"system": "BaMnO3", "message": "STRUCT is missing"},
+            {"system": "BaMnO3", "message": "PHON output is incomplete"},
+        ]}
+        mock_post.return_value = response
+
+        assert not send_archive(
+            "https://example.com/upload", archive, errors=errors,
+            system_labels=["BaMnO3"],
+        )
+        notice = errors.consume()
+        assert "STRUCT is missing" in notice
+        assert "PHON output is incomplete" in notice
+
+    @patch("aiida_mpds_monitor.webhook.requests.post")
     def test_error_notice_redacts_credentials_and_bounds_text(self, mock_post, tmp_path):
         archive = tmp_path / "result.7z"
         archive.write_bytes(b"archive")
@@ -207,7 +260,53 @@ class TestSendArchive:
         notice = errors.consume()
         assert "secret" not in notice
         assert "[REDACTED]" in notice
-        assert len(notice.splitlines()[-1]) == 500
+        assert notice.endswith("x" * 1000)
+
+    @patch("aiida_mpds_monitor.webhook.requests.post")
+    def test_server_errors_are_stored_by_system_and_deduplicated(
+        self, mock_post, tmp_path,
+    ):
+        archive = tmp_path / "result.7z"
+        archive.write_bytes(b"archive")
+        stored = {}
+        node = MagicMock(pk=123, uuid="parent-123")
+        node.base.extras.get.side_effect = lambda name, default=None: stored.get(name, default)
+        node.base.extras.set.side_effect = lambda name, value: stored.__setitem__(name, value)
+        node.base.extras.delete.side_effect = lambda name: stored.pop(name, None)
+        errors = ArchiveUploadErrors()
+        response = MagicMock(status_code=422)
+        response.json.return_value = {"detail": "Invalid structure"}
+        mock_post.return_value = response
+        options = {
+            "errors": errors,
+            "system_labels": ["BaMnO3"],
+            "error_node": node,
+        }
+
+        assert not send_archive("https://example.com/upload", archive, **options)
+        notice = errors.consume()
+        assert "System: BaMnO3" in notice
+        assert "Calculation PK: 123" in notice
+        assert "Invalid structure" in notice
+        assert stored[EXTRA_ARCHIVE_SERVER_ERRORS] == [{
+            "system": "BaMnO3",
+            "message": "Archive upload failed (HTTP 422): Invalid structure",
+        }]
+
+        assert not send_archive("https://example.com/upload", archive, **options)
+        assert errors.consume() == ""
+
+        response.json.return_value = {"detail": "Missing output"}
+        assert not send_archive("https://example.com/upload", archive, **options)
+        assert "Missing output" in errors.consume()
+        assert stored[EXTRA_ARCHIVE_SERVER_ERRORS] == [{
+            "system": "BaMnO3",
+            "message": "Archive upload failed (HTTP 422): Missing output",
+        }]
+
+        mock_post.return_value = MagicMock(status_code=200)
+        assert send_archive("https://example.com/upload", archive, **options)
+        assert EXTRA_ARCHIVE_SERVER_ERRORS not in stored
 
     @patch("aiida_mpds_monitor.webhook.requests.post")
     def test_network_error_notice_is_safe_and_not_repeated(self, mock_post, tmp_path):

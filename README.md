@@ -7,6 +7,7 @@
 - YAML configuration for parent, child, and calculation process types.
 - Status webhooks for completed and failed calculations.
 - `.7z` archives of retrieved outputs and submitted inputs.
+- FLEUR archive support: a calculation holding phonopy force constants also gets a `PHONON.json` with Gamma-point and mesh frequencies in cm-1, the number of imaginary modes, the zero-point energy and the phonon thermodynamics at 300 K.
 - CRYSTAL archive validation and recovery after a specific server rejection.
 - Workflow filters by creation date, formula, and chemical elements.
 - Optional Telegram reports for running calculations and upload errors.

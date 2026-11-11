@@ -6,6 +6,8 @@ from itertools import chain
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
+import numpy as np
+
 from aiida import load_profile as load_aiida_profile
 from aiida.orm import CalcJobNode, load_node, WorkChainNode
 
@@ -20,12 +22,36 @@ logger = logging.getLogger(__name__)
 INPUT_GENERATION_PROCESS_LABELS = frozenset({"FleurinputgenCalculation"})
 
 LABEL_DICT = {
-    "Elastic constants":"ELASTIC",
-    "Phonon frequencies":"PHONON",
-    "Geometry optimization":"STRUCT",
+    "Elastic constants": "ELASTIC",
+    "Phonon frequencies": "PHONON",
+    "Geometry optimization": "STRUCT",
     # "":"TRANSPORT",
     # "":"ELECTRON",
 }
+
+# Phonon summary parameters, shared with the dft_organizer phonon reporting.
+PHONON_MESH = [8, 8, 8]
+IMAGINARY_THRESHOLD_CM1 = -1.67
+THZ_TO_CM1 = 33.35641
+KJ_MOL_PER_EV = 96.4853321233
+
+
+def _requires_saved_input(calculation: Any) -> bool:
+    """CRYSTAL-style calculations must carry their submitted INPUT deck.
+
+    FLEUR runs keep their inputs among the retrieved files (``inp.xml``) and
+    the phonopy post-processing stores its parameters as node data, so for
+    those a missing repository INPUT never aborts the archive.
+    """
+    process_label = getattr(calculation, "process_label", "") or ""
+    if process_label in INPUT_GENERATION_PROCESS_LABELS:
+        return False
+    if isinstance(process_label, str) and process_label.startswith("Fleur"):
+        return False
+    if process_label == "PhonopyCalculation":
+        return False
+    return True
+
 
 def _node_marker(node: Any):
     """Return a stable traversal marker for an AiiDA node or test double."""
@@ -43,18 +69,11 @@ def _node_marker(node: Any):
 def _node_description(node: Any) -> str:
     """Return a concise description of an AiiDA process node."""
     process_label = getattr(node, "process_label", None) or type(node).__name__
-    identifier = (
-        getattr(node, "pk", None)
-        or getattr(node, "uuid", None)
-        or "unknown"
-    )
+    identifier = getattr(node, "pk", None) or getattr(node, "uuid", None) or "unknown"
     process_state = getattr(node, "process_state", None)
     state = getattr(process_state, "value", process_state)
     exit_status = getattr(node, "exit_status", None)
-    return (
-        f"{process_label} {identifier} "
-        f"(state={state or 'unknown'}, exit_status={exit_status})"
-    )
+    return f"{process_label} {identifier} (state={state or 'unknown'}, exit_status={exit_status})"
 
 
 def validate_subnodes_succeeded(nodes: Iterable[Any]) -> bool:
@@ -97,9 +116,7 @@ def validate_subnodes_succeeded(nodes: Iterable[Any]) -> bool:
 def validate_archive_contents(archive_root: Path) -> bool:
     """Return ``True`` when at least one non-empty calculation folder exists."""
     archive_root = Path(archive_root)
-    calculation_dirs = sorted(
-        path for path in archive_root.iterdir() if path.is_dir()
-    )
+    calculation_dirs = sorted(path for path in archive_root.iterdir() if path.is_dir())
     if not calculation_dirs:
         return False
 
@@ -157,12 +174,17 @@ def _copy_retrieved(folder: Any, destination: Path) -> List[str]:
 
 
 def _copy_calculation_input(
-    calculation: Any, destination: Path, retrieved_names: Iterable[str]
+    calculation: Any, destination: Path, retrieved_names: Iterable[str], required: bool = True
 ) -> bool:
     """Add the submitted input from the CalcJob repository as ``INPUT``.
 
     Input files are stored on the CalcJob itself and need not be retrieved from
     the remote computer. Prefer an INPUT already copied from retrieved data.
+    The input deck is mandatory for CRYSTAL calculations: an archive without
+    the submitted d12 has lost the important input data. Other engines (FLEUR,
+    phonopy) ship their inputs among the retrieved files (``inp.xml``,
+    ``INPUT.json``), so for them the copy is best-effort: a missing repository
+    input never aborts the archive, and FLEUR's ``inp.xml`` keeps its own name.
     """
     if "INPUT" in retrieved_names and (destination / "INPUT").is_file():
         return True
@@ -171,24 +193,39 @@ def _copy_calculation_input(
         repository = calculation.base.repository
         input_filename = calculation.get_option("input_filename") or "INPUT"
         candidates = list(dict.fromkeys([input_filename, "INPUT"]))
+        if not required:
+            candidates.append("inp.xml")
         for filename in candidates:
             try:
                 with repository.open(filename, "rb") as source:
                     contents = source.read()
             except FileNotFoundError:
                 continue
-            (destination / "INPUT").write_bytes(contents)
+            # CRYSTAL decks are normalized to INPUT; other engines keep the
+            # original name (FLEUR's inp.xml is what consumers look for).
+            target = "INPUT" if required else filename
+            (destination / target).write_bytes(contents)
             return True
-        logger.warning(
-            "Archive generation skipped: no saved INPUT for %s",
-            _node_description(calculation),
-        )
+        if required:
+            logger.warning(
+                "Archive generation skipped: no saved INPUT for %s",
+                _node_description(calculation),
+            )
+        else:
+            logger.info(
+                "No repository input for %s: relying on the retrieved files",
+                _node_description(calculation),
+            )
     except Exception as exc:
-        logger.warning(
-            "Archive generation skipped: could not copy INPUT for %s: %s",
-            _node_description(calculation), exc,
-        )
-    return False
+        if required:
+            logger.warning(
+                "Archive generation skipped: could not copy INPUT for %s: %s",
+                _node_description(calculation),
+                exc,
+            )
+        else:
+            logger.info("Could not copy input for %s: %s", _node_description(calculation), exc)
+    return not required
 
 
 def _iter_called_descendants(nodes: Iterable[Any]) -> Iterable[Any]:
@@ -201,10 +238,7 @@ def _iter_called_descendants(nodes: Iterable[Any]) -> Iterable[Any]:
         try:
             pending.extend(reversed(list(node.called)))
         except Exception as exc:
-            print(
-                "Warning: Could not inspect subnodes of "
-                f"{_node_description(node)}: {exc}"
-            )
+            print(f"Warning: Could not inspect subnodes of {_node_description(node)}: {exc}")
 
     while pending:
         node = pending.pop()
@@ -217,10 +251,7 @@ def _iter_called_descendants(nodes: Iterable[Any]) -> Iterable[Any]:
         try:
             pending.extend(reversed(list(node.called)))
         except Exception as exc:
-            print(
-                "Warning: Could not inspect subnodes of "
-                f"{_node_description(node)}: {exc}"
-            )
+            print(f"Warning: Could not inspect subnodes of {_node_description(node)}: {exc}")
 
 
 def _cleanup_staging(directory: Path, root: Path) -> None:
@@ -247,6 +278,107 @@ def _iter_archive_calculations(parent_node: Any, base_nodes: Iterable[Any]) -> I
         if marker not in visited:
             visited.add(marker)
             yield node
+
+
+def _phonon_frequencies(phonopy_instance: Any, force_constants: Any) -> dict:
+    """Compute the phonon summary ``PHONON.json`` is built from.
+
+    The phonopy instance works in its default THz units: frequencies are
+    converted to cm-1 afterwards, while the thermodynamic properties must be
+    evaluated from THz to stay correct (phonopy physical constants assume THz).
+    """
+    ph = phonopy_instance
+    ph.force_constants = force_constants
+    ph.symmetrize_force_constants()
+
+    ph.run_mesh(PHONON_MESH)
+    mesh = ph.get_mesh_dict()
+    freqs_cm1 = np.asarray(mesh["frequencies"], dtype=float) * THZ_TO_CM1
+    n_qpoints, n_bands = freqs_cm1.shape
+
+    ph.run_qpoints([[0.0, 0.0, 0.0]])
+    gamma_cm1 = np.asarray(ph.get_qpoints_dict()["frequencies"])[0] * THZ_TO_CM1
+
+    ph.run_thermal_properties(t_min=0, t_max=300, t_step=300)
+    thermal = ph.get_thermal_properties_dict()
+    temperatures = list(thermal["temperatures"])
+    index_zero = min(range(len(temperatures)), key=lambda i: abs(temperatures[i]))
+    index_300 = min(range(len(temperatures)), key=lambda i: abs(temperatures[i] - 300))
+
+    zero_point_ev = float(thermal["free_energy"][index_zero]) / KJ_MOL_PER_EV
+
+    return {
+        "engine": "fleur",
+        "source": "aiida-mpds-monitor",
+        "mesh": list(PHONON_MESH),
+        "gamma_frequencies_cm1": [round(float(f), 2) for f in gamma_cm1],
+        "n_imaginary": int((freqs_cm1 < IMAGINARY_THRESHOLD_CM1).sum()),
+        "n_qpoints": int(n_qpoints),
+        "n_bands": int(n_bands),
+        "zero_point_energy": round(zero_point_ev, 4),
+        "zero_point_energy_units": "eV/cell",
+        "thermodynamics": {
+            "temperature": float(temperatures[index_300]),
+            "temperature_units": "K",
+            "free_energy_kjmol": round(float(thermal["free_energy"][index_300]), 3),
+            "free_energy_units": "kJ/mol",
+            "entropy_jkmol": round(float(thermal["entropy"][index_300]), 3),
+            "entropy_units": "J/(mol*K)",
+            "heat_capacity_jkmol": round(float(thermal["heat_capacity"][index_300]), 3),
+            "heat_capacity_units": "J/(mol*K)",
+        },
+    }
+
+
+def _calculation_attributes(parameters_node: Any) -> Optional[dict]:
+    """Return the attributes of an AiiDA data node holding a plain dict."""
+    try:
+        return parameters_node.base.attributes.all
+    except AttributeError:
+        pass
+    try:
+        return parameters_node.get_dict()
+    except Exception:
+        return None
+
+
+def _collect_phonon_data(calculation: Any) -> Optional[dict]:
+    """Return the phonon summary for a calculation holding force constants.
+
+    Phonopy-style calculations are the only ones exposing force constants as
+    an output and phonopy metadata as an input; everything else (SCF, inpgen,
+    forces runs) yields ``None`` and never writes ``PHONON.json``. Failures
+    never break archive generation: the calculation directory is still
+    shipped, just without the summary.
+    """
+    try:
+        phonopy_data = calculation.inputs.phonopy_data
+        force_constants = calculation.outputs.output_force_constants.get_array("force_constants")
+    except Exception:
+        return None
+
+    identifier = f"{getattr(calculation, 'process_label', '?')} {getattr(calculation, 'pk', '?')}"
+
+    try:
+        phonopy_instance = phonopy_data.get_phonopy_instance()
+    except Exception as exc:
+        logger.warning("Could not rebuild phonopy instance for %s: %s", identifier, exc)
+        return None
+
+    try:
+        summary = _phonon_frequencies(phonopy_instance, force_constants)
+    except Exception as exc:
+        logger.warning("Could not compute phonon frequencies for %s: %s", identifier, exc)
+        return None
+
+    try:
+        params = _calculation_attributes(calculation.outputs.output_parameters)
+        if params and params.get("space_group"):
+            summary["space_group"] = params["space_group"]
+    except Exception:
+        pass
+
+    return summary
 
 
 def has_publishable_results(parent_node: Any, base_nodes: Iterable[Any]) -> bool:
@@ -314,7 +446,7 @@ def generate_archive(
             print(f"Error copying files for {uuid}: {e}")
             return None
 
-        if not _copy_calculation_input(calc, calc_dir, names):
+        if not _copy_calculation_input(calc, calc_dir, names, required=_requires_saved_input(calc)):
             return None
 
         # Write INPUT.json if parameters are present
@@ -427,14 +559,16 @@ def generate_parent_archive(
 
             process_label = getattr(calculation, "process_label", "")
             is_crystal_calculation = (
-                isinstance(process_label, str) and process_label.startswith("Crystal")
+                isinstance(process_label, str)
+                and process_label.startswith("Crystal")
                 and process_label.endswith("Calculation")
             )
             if getattr(calculation, "is_finished_ok", False) is not True:
                 skipped.append(calculation.pk)
                 logger.warning(
                     "Leaving unsuccessful calculation out of archive %s: %s",
-                    parent_dir_name, _node_description(calculation),
+                    parent_dir_name,
+                    _node_description(calculation),
                 )
                 continue
 
@@ -454,8 +588,7 @@ def generate_parent_archive(
                 names = repo_folder.list_object_names()
             except Exception as e:
                 print(
-                    f"Warning: Could not access retrieved folder for {label_} "
-                    f"{calculation.pk}: {e}"
+                    f"Warning: Could not access retrieved folder for {label_} {calculation.pk}: {e}"
                 )
                 return None
 
@@ -483,7 +616,9 @@ def generate_parent_archive(
                 logger.warning("Could not copy retrieved results for %s: %s", calculation.pk, exc)
                 return None
 
-            if not _copy_calculation_input(calculation, calculation_dir, names):
+            if not _copy_calculation_input(
+                calculation, calculation_dir, names, required=_requires_saved_input(calculation)
+            ):
                 return None
 
             try:
@@ -498,20 +633,32 @@ def generate_parent_archive(
                     with (calculation_dir / "INPUT.json").open("w") as f:
                         json.dump(params, f, indent=2, default=str)
             except Exception as e:
-                print(
-                    f"Warning: Could not save INPUT.json for {label_} "
-                    f"{calculation.pk}: {e}"
-                )
+                print(f"Warning: Could not save INPUT.json for {label_} {calculation.pk}: {e}")
+
+            # A phonopy calculation holds the force constants; the ESDD upload
+            # needs the resulting frequencies and cannot recompute them from
+            # the archived files alone.
+            phonon_data = _collect_phonon_data(calculation)
+            if phonon_data is not None:
+                try:
+                    with (calculation_dir / "PHONON.json").open("w") as f:
+                        json.dump(phonon_data, f, indent=2)
+                except Exception as e:
+                    print(f"Warning: Could not save PHONON.json for {label_} {calculation.pk}: {e}")
 
         if skipped:
             logger.warning(
                 "Archive %s left out %d unsuccessful calculation(s): %s",
-                parent_dir_name, len(skipped), ", ".join(map(str, skipped)),
+                parent_dir_name,
+                len(skipped),
+                ", ".join(map(str, skipped)),
             )
 
         if archive_path is None:
             # Equal material labels in different parents must not share a local archive.
-            archive_path = tmp_root.parent / "archives" / _safe_dir_name(parent_uuid) / f"{parent_dir_name}.7z"
+            archive_path = (
+                tmp_root.parent / "archives" / _safe_dir_name(parent_uuid) / f"{parent_dir_name}.7z"
+            )
         archive_path = Path(archive_path)
 
         if not validate_archive_contents(archive_root):

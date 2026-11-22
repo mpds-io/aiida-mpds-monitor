@@ -351,7 +351,7 @@ def _toy_phonopy():
         cell=np.eye(3) * 3.0,
         scaled_positions=[[0.0, 0.0, 0.0], [0.5, 0.5, 0.5]],
     )
-    return Phonopy(unitcell, supercell_matrix=np.eye(3, dtype=int))
+    return Phonopy(unitcell, supercell_matrix=np.eye(3, dtype=int), primitive_matrix=np.eye(3))
 
 
 def _toy_force_constants():
@@ -369,7 +369,7 @@ def _toy_force_constants():
 def test_phonon_frequencies_summarizes_a_simple_crystal():
     summary = _phonon_frequencies(_toy_phonopy(), _toy_force_constants())
 
-    assert summary["engine"] == "fleur"
+    assert "engine" not in summary
     assert summary["mesh"] == [8, 8, 8]
     assert summary["n_bands"] == 6
     assert summary["n_qpoints"] > 0
@@ -392,7 +392,17 @@ def test_phonon_frequencies_summarizes_a_simple_crystal():
     assert thermodynamics["heat_capacity_jkmol"] > 0
 
 
-def test_collect_phonon_data_uses_force_constants_and_space_group(tmp_path):
+@pytest.mark.parametrize(
+    ("process_type", "engine"),
+    [
+        ("aiida.workflows:phonopy.fleur", "fleur"),
+        ("aiida.workflows:phonopy.vasp", None),
+        (None, None),
+    ],
+)
+def test_collect_phonon_data_uses_force_constants_and_space_group(
+    tmp_path, caplog, process_type, engine
+):
     node = DummyCalcJobNode(
         uuid="phonopy-uuid",
         label="",
@@ -400,6 +410,7 @@ def test_collect_phonon_data_uses_force_constants_and_space_group(tmp_path):
         retrieved=_create_retrieved_folder(tmp_path / "repo", {"aiida.out": b"constants"}),
     )
     node.process_label = "PhonopyCalculation"
+    node.caller = SimpleNamespace(process_type=process_type) if process_type else None
     node.inputs = SimpleNamespace(phonopy_data=SimpleNamespace(get_phonopy_instance=_toy_phonopy))
     node.outputs = SimpleNamespace(
         retrieved=node.outputs.retrieved,
@@ -414,6 +425,8 @@ def test_collect_phonon_data_uses_force_constants_and_space_group(tmp_path):
     summary = _collect_phonon_data(node)
 
     assert summary is not None
+    assert summary.get("engine") == engine
+    assert ("Unknown force engine" in caplog.text) is (engine is None)
     assert summary["space_group"] == {"type": "Fd-3m", "number": 227}
     assert len(summary["gamma_frequencies_cm1"]) == 6
     assert summary["n_bands"] == 6
@@ -503,3 +516,47 @@ def test_parent_archive_writes_phonon_json(tmp_path):
         "PhonopyCalculation/aiida.out",
         "scf: fleur run 1/out.xml",
     ]
+
+
+
+@pytest.mark.parametrize(
+    ("labels", "dirs"),
+    [
+        (
+            ("Fleur forces calculation 01", "Fleur forces calculation 02"),
+            ("Fleur forces calculation 01", "Fleur forces calculation 02"),
+        ),
+        (
+            ("Fleur forces calculation [1]", "Fleur forces calculation [2]"),
+            ("forces calculation", "forces calculation_102"),
+        ),
+    ],
+)
+def test_fleur_displacement_folders(tmp_path, labels, dirs):
+    jobs = []
+    for pk, label in enumerate(labels, start=101):
+        job = DummyCalcJobNode(
+            uuid=f"forces-{pk}",
+            label=label,
+            pk=pk,
+            retrieved=_create_retrieved_folder(
+                tmp_path / str(pk), {"out.xml": str(pk).encode()}
+            ),
+        )
+        job.process_label = "FleurCalculation"
+        jobs.append(job)
+
+    parent = DummyProcessNode(uuid="parent-uuid", label="MgO_225 - phonons", called=jobs)
+
+    def check_archive(source_dir, *args, **kwargs):
+        assert {path.name for path in source_dir.iterdir()} == set(dirs)
+        for pk, dirname in enumerate(dirs, start=101):
+            assert (source_dir / dirname / "out.xml").read_bytes() == str(pk).encode()
+        return _fake_archive_and_save(source_dir, *args, **kwargs)
+
+    with (
+        patch("aiida_mpds_monitor.generate_archive.load_node", return_value=parent),
+        patch("aiida_mpds_monitor.generate_archive.CalcJobNode", DummyCalcJobNode),
+        patch("aiida_mpds_monitor.generate_archive.archive_and_save", side_effect=check_archive),
+    ):
+        assert generate_parent_archive("parent-uuid", tmp_root=tmp_path / "tmp") is not None

@@ -13,7 +13,12 @@ from aiida.orm import CalcJobNode, load_node, WorkChainNode
 
 load_aiida_profile()
 
-from dft_organizer.archive import archive_and_save
+try:
+    from dft_organizer.core import archive_and_save
+except ModuleNotFoundError as exc:
+    if exc.name != "dft_organizer.core":
+        raise
+    from dft_organizer.archive import archive_and_save
 
 from .status import excluded_from_archive
 
@@ -44,8 +49,6 @@ def _requires_saved_input(calculation: Any) -> bool:
     those a missing repository INPUT never aborts the archive.
     """
     process_label = getattr(calculation, "process_label", "") or ""
-    if process_label in INPUT_GENERATION_PROCESS_LABELS:
-        return False
     if isinstance(process_label, str) and process_label.startswith("Fleur"):
         return False
     if process_label == "PhonopyCalculation":
@@ -308,7 +311,6 @@ def _phonon_frequencies(phonopy_instance: Any, force_constants: Any) -> dict:
     zero_point_ev = float(thermal["free_energy"][index_zero]) / KJ_MOL_PER_EV
 
     return {
-        "engine": "fleur",
         "source": "aiida-mpds-monitor",
         "mesh": list(PHONON_MESH),
         "gamma_frequencies_cm1": [round(float(f), 2) for f in gamma_cm1],
@@ -370,6 +372,15 @@ def _collect_phonon_data(calculation: Any) -> Optional[dict]:
     except Exception as exc:
         logger.warning("Could not compute phonon frequencies for %s: %s", identifier, exc)
         return None
+
+    try:
+        caller = getattr(calculation, "caller", None)
+        if getattr(caller, "process_type", None) == "aiida.workflows:phonopy.fleur":
+            summary["engine"] = "fleur"
+        else:
+            logger.warning("Unknown force engine for %s; leaving engine unset", identifier)
+    except Exception as exc:
+        logger.warning("Could not check force provenance for %s: %s", identifier, exc)
 
     try:
         params = _calculation_attributes(calculation.outputs.output_parameters)

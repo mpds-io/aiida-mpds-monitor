@@ -4,6 +4,7 @@ import re
 import shutil
 from itertools import chain
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Any, Dict, Iterable, List, Optional
 
 from aiida import load_profile as load_aiida_profile
@@ -11,7 +12,12 @@ from aiida.orm import CalcJobNode, load_node, WorkChainNode
 
 load_aiida_profile()
 
-from dft_organizer.archive import archive_and_save
+try:
+    from dft_organizer.core import archive_and_save
+except ModuleNotFoundError as exc:
+    if exc.name != "dft_organizer.core":
+        raise
+    from dft_organizer.archive import archive_and_save
 
 from .status import excluded_from_archive
 
@@ -20,12 +26,31 @@ logger = logging.getLogger(__name__)
 INPUT_GENERATION_PROCESS_LABELS = frozenset({"FleurinputgenCalculation"})
 
 LABEL_DICT = {
-    "Elastic constants":"ELASTIC",
-    "Phonon frequencies":"PHONON",
-    "Geometry optimization":"STRUCT",
+    "Elastic constants": "ELASTIC",
+    "Phonon frequencies": "PHONON",
+    "Geometry optimization": "STRUCT",
     # "":"TRANSPORT",
     # "":"ELECTRON",
 }
+
+# Phonon summary parameters, shared with the dft_organizer phonon reporting.
+PHONON_MESH = [8, 8, 8]
+
+
+def _requires_saved_input(calculation: Any) -> bool:
+    """CRYSTAL-style calculations must carry their submitted INPUT deck.
+
+    FLEUR runs keep their inputs among the retrieved files (``inp.xml``) and
+    the phonopy post-processing stores its parameters as node data, so for
+    those a missing repository INPUT never aborts the archive.
+    """
+    process_label = getattr(calculation, "process_label", "") or ""
+    if isinstance(process_label, str) and process_label.startswith("Fleur"):
+        return False
+    if process_label == "PhonopyCalculation":
+        return False
+    return True
+
 
 def _node_marker(node: Any):
     """Return a stable traversal marker for an AiiDA node or test double."""
@@ -43,18 +68,11 @@ def _node_marker(node: Any):
 def _node_description(node: Any) -> str:
     """Return a concise description of an AiiDA process node."""
     process_label = getattr(node, "process_label", None) or type(node).__name__
-    identifier = (
-        getattr(node, "pk", None)
-        or getattr(node, "uuid", None)
-        or "unknown"
-    )
+    identifier = getattr(node, "pk", None) or getattr(node, "uuid", None) or "unknown"
     process_state = getattr(node, "process_state", None)
     state = getattr(process_state, "value", process_state)
     exit_status = getattr(node, "exit_status", None)
-    return (
-        f"{process_label} {identifier} "
-        f"(state={state or 'unknown'}, exit_status={exit_status})"
-    )
+    return f"{process_label} {identifier} (state={state or 'unknown'}, exit_status={exit_status})"
 
 
 def validate_subnodes_succeeded(nodes: Iterable[Any]) -> bool:
@@ -97,9 +115,7 @@ def validate_subnodes_succeeded(nodes: Iterable[Any]) -> bool:
 def validate_archive_contents(archive_root: Path) -> bool:
     """Return ``True`` when at least one non-empty calculation folder exists."""
     archive_root = Path(archive_root)
-    calculation_dirs = sorted(
-        path for path in archive_root.iterdir() if path.is_dir()
-    )
+    calculation_dirs = sorted(path for path in archive_root.iterdir() if path.is_dir())
     if not calculation_dirs:
         return False
 
@@ -137,16 +153,20 @@ def _safe_dir_name(name: str) -> str:
     return result
 
 
-def _copy_retrieved(folder: Any, destination: Path) -> List[str]:
-    """Copy the complete repository tree; propagate errors to abort publication."""
+def _copy_retrieved(
+    folder: Any, destination: Path, *, exclude: frozenset[str] = frozenset()
+) -> List[str]:
+    """Copy the repository tree, skipping explicitly excluded relative paths."""
     repository = getattr(getattr(folder, "base", None), "repository", folder)
-    names = folder.list_object_names()
+    names = [name for name in folder.list_object_names() if name not in exclude]
     if hasattr(repository, "walk"):
         for directory, directories, files in repository.walk():
             target = destination / directory
             target.mkdir(parents=True, exist_ok=True)
             for name in files:
                 relative = str(Path(directory) / name)
+                if relative in exclude:
+                    continue
                 with repository.open(relative, "rb") as source, (target / name).open("wb") as dest:
                     shutil.copyfileobj(source, dest)
     else:
@@ -157,12 +177,17 @@ def _copy_retrieved(folder: Any, destination: Path) -> List[str]:
 
 
 def _copy_calculation_input(
-    calculation: Any, destination: Path, retrieved_names: Iterable[str]
+    calculation: Any, destination: Path, retrieved_names: Iterable[str], required: bool = True
 ) -> bool:
     """Add the submitted input from the CalcJob repository as ``INPUT``.
 
     Input files are stored on the CalcJob itself and need not be retrieved from
     the remote computer. Prefer an INPUT already copied from retrieved data.
+    The input deck is mandatory for CRYSTAL calculations: an archive without
+    the submitted d12 has lost the important input data. Other engines (FLEUR,
+    phonopy) ship their inputs among the retrieved files (``inp.xml``,
+    ``INPUT.json``), so for them the copy is best-effort: a missing repository
+    input never aborts the archive, and FLEUR's ``inp.xml`` keeps its own name.
     """
     if "INPUT" in retrieved_names and (destination / "INPUT").is_file():
         return True
@@ -171,24 +196,39 @@ def _copy_calculation_input(
         repository = calculation.base.repository
         input_filename = calculation.get_option("input_filename") or "INPUT"
         candidates = list(dict.fromkeys([input_filename, "INPUT"]))
+        if not required:
+            candidates.append("inp.xml")
         for filename in candidates:
             try:
                 with repository.open(filename, "rb") as source:
                     contents = source.read()
             except FileNotFoundError:
                 continue
-            (destination / "INPUT").write_bytes(contents)
+            # CRYSTAL decks are normalized to INPUT; other engines keep the
+            # original name (FLEUR's inp.xml is what consumers look for).
+            target = "INPUT" if required else filename
+            (destination / target).write_bytes(contents)
             return True
-        logger.warning(
-            "Archive generation skipped: no saved INPUT for %s",
-            _node_description(calculation),
-        )
+        if required:
+            logger.warning(
+                "Archive generation skipped: no saved INPUT for %s",
+                _node_description(calculation),
+            )
+        else:
+            logger.info(
+                "No repository input for %s: relying on the retrieved files",
+                _node_description(calculation),
+            )
     except Exception as exc:
-        logger.warning(
-            "Archive generation skipped: could not copy INPUT for %s: %s",
-            _node_description(calculation), exc,
-        )
-    return False
+        if required:
+            logger.warning(
+                "Archive generation skipped: could not copy INPUT for %s: %s",
+                _node_description(calculation),
+                exc,
+            )
+        else:
+            logger.info("Could not copy input for %s: %s", _node_description(calculation), exc)
+    return not required
 
 
 def _iter_called_descendants(nodes: Iterable[Any]) -> Iterable[Any]:
@@ -201,10 +241,7 @@ def _iter_called_descendants(nodes: Iterable[Any]) -> Iterable[Any]:
         try:
             pending.extend(reversed(list(node.called)))
         except Exception as exc:
-            print(
-                "Warning: Could not inspect subnodes of "
-                f"{_node_description(node)}: {exc}"
-            )
+            print(f"Warning: Could not inspect subnodes of {_node_description(node)}: {exc}")
 
     while pending:
         node = pending.pop()
@@ -217,10 +254,7 @@ def _iter_called_descendants(nodes: Iterable[Any]) -> Iterable[Any]:
         try:
             pending.extend(reversed(list(node.called)))
         except Exception as exc:
-            print(
-                "Warning: Could not inspect subnodes of "
-                f"{_node_description(node)}: {exc}"
-            )
+            print(f"Warning: Could not inspect subnodes of {_node_description(node)}: {exc}")
 
 
 def _cleanup_staging(directory: Path, root: Path) -> None:
@@ -247,6 +281,51 @@ def _iter_archive_calculations(parent_node: Any, base_nodes: Iterable[Any]) -> I
         if marker not in visited:
             visited.add(marker)
             yield node
+
+
+def _write_phonon_outputs(phonopy_instance: Any, force_constants: Any, directory: Path) -> None:
+    """Run the phonon post-processing and write the standard Phonopy outputs."""
+    ph = phonopy_instance
+    ph.force_constants = force_constants
+    ph.symmetrize_force_constants()
+    ph.run_mesh(PHONON_MESH)
+    ph.run_qpoints([[0.0, 0.0, 0.0]])
+    ph.run_thermal_properties(t_min=0, t_max=300, t_step=300)
+
+    with TemporaryDirectory(dir=directory.parent) as temporary:
+        staging = Path(temporary)
+        ph.qpoints.write_yaml(filename=str(staging / "qpoints.yaml"))
+        ph.mesh.write_hdf5(filename=str(staging / "mesh.hdf5"))
+        ph.thermal_properties.write_yaml(filename=str(staging / "thermal_properties.yaml"))
+        published = []
+        try:
+            for path in staging.iterdir():
+                target = directory / path.name
+                path.replace(target)
+                published.append(target)
+        except OSError:
+            for target in published:
+                target.unlink(missing_ok=True)
+            raise
+
+
+def _write_calculation_phonon_outputs(calculation: Any, directory: Path) -> None:
+    """Export phonons when the calculation provides the required AiiDA data."""
+    if getattr(calculation, "process_label", None) != "PhonopyCalculation":
+        return
+    try:
+        phonopy_data = calculation.inputs.phonopy_data
+        force_constants_node = calculation.outputs.output_force_constants
+    except AttributeError:
+        return
+    try:
+        _write_phonon_outputs(
+            phonopy_data.get_phonopy_instance(),
+            force_constants_node.get_array("force_constants"),
+            directory,
+        )
+    except Exception as exc:
+        logger.warning("Could not write Phonopy outputs for calculation %s: %s", calculation.pk, exc)
 
 
 def has_publishable_results(parent_node: Any, base_nodes: Iterable[Any]) -> bool:
@@ -314,7 +393,7 @@ def generate_archive(
             print(f"Error copying files for {uuid}: {e}")
             return None
 
-        if not _copy_calculation_input(calc, calc_dir, names):
+        if not _copy_calculation_input(calc, calc_dir, names, required=_requires_saved_input(calc)):
             return None
 
         # Write INPUT.json if parameters are present
@@ -427,14 +506,16 @@ def generate_parent_archive(
 
             process_label = getattr(calculation, "process_label", "")
             is_crystal_calculation = (
-                isinstance(process_label, str) and process_label.startswith("Crystal")
+                isinstance(process_label, str)
+                and process_label.startswith("Crystal")
                 and process_label.endswith("Calculation")
             )
             if getattr(calculation, "is_finished_ok", False) is not True:
                 skipped.append(calculation.pk)
                 logger.warning(
                     "Leaving unsuccessful calculation out of archive %s: %s",
-                    parent_dir_name, _node_description(calculation),
+                    parent_dir_name,
+                    _node_description(calculation),
                 )
                 continue
 
@@ -454,8 +535,7 @@ def generate_parent_archive(
                 names = repo_folder.list_object_names()
             except Exception as e:
                 print(
-                    f"Warning: Could not access retrieved folder for {label_} "
-                    f"{calculation.pk}: {e}"
+                    f"Warning: Could not access retrieved folder for {label_} {calculation.pk}: {e}"
                 )
                 return None
 
@@ -477,18 +557,26 @@ def generate_parent_archive(
             calculation_dir.mkdir(parents=True, exist_ok=False)
             if stage_nodes is not None:
                 stage_nodes[label_str] = calculation
+            is_phonopy = process_label == "PhonopyCalculation"
             try:
-                _copy_retrieved(repo_folder, calculation_dir)
+                excluded_files = (
+                    frozenset({"_scheduler-stdout.txt", "_scheduler-stderr.txt", "aiida.in", "aiida.out"})
+                    if is_phonopy
+                    else frozenset()
+                )
+                _copy_retrieved(repo_folder, calculation_dir, exclude=excluded_files)
             except Exception as exc:
                 logger.warning("Could not copy retrieved results for %s: %s", calculation.pk, exc)
                 return None
 
-            if not _copy_calculation_input(calculation, calculation_dir, names):
+            if not is_phonopy and not _copy_calculation_input(
+                calculation, calculation_dir, names, required=_requires_saved_input(calculation)
+            ):
                 return None
 
             try:
                 params = None
-                if save_input_json and hasattr(calculation.inputs, "parameters"):
+                if not is_phonopy and save_input_json and hasattr(calculation.inputs, "parameters"):
                     try:
                         params = calculation.inputs.parameters.get_dict()
                     except Exception:
@@ -498,20 +586,27 @@ def generate_parent_archive(
                     with (calculation_dir / "INPUT.json").open("w") as f:
                         json.dump(params, f, indent=2, default=str)
             except Exception as e:
-                print(
-                    f"Warning: Could not save INPUT.json for {label_} "
-                    f"{calculation.pk}: {e}"
-                )
+                print(f"Warning: Could not save INPUT.json for {label_} {calculation.pk}: {e}")
+
+            _write_calculation_phonon_outputs(calculation, calculation_dir)
+            if is_phonopy and not any(calculation_dir.iterdir()):
+                calculation_dir.rmdir()
+                if stage_nodes is not None:
+                    stage_nodes.pop(label_str, None)
 
         if skipped:
             logger.warning(
                 "Archive %s left out %d unsuccessful calculation(s): %s",
-                parent_dir_name, len(skipped), ", ".join(map(str, skipped)),
+                parent_dir_name,
+                len(skipped),
+                ", ".join(map(str, skipped)),
             )
 
         if archive_path is None:
             # Equal material labels in different parents must not share a local archive.
-            archive_path = tmp_root.parent / "archives" / _safe_dir_name(parent_uuid) / f"{parent_dir_name}.7z"
+            archive_path = (
+                tmp_root.parent / "archives" / _safe_dir_name(parent_uuid) / f"{parent_dir_name}.7z"
+            )
         archive_path = Path(archive_path)
 
         if not validate_archive_contents(archive_root):

@@ -1,0 +1,50 @@
+# Staged FLEUR structure/phonon hierarchy for ~/.aiida/aiida_mpds_monitor/conf.yaml.
+#
+# Do not merge this into the live config until monitor_filters bounds the scan
+# to new runs: without a bound the first scan backfills every historical FLEUR
+# node in the profile (~800 MPDSFleurStructureWorkChain and ~235
+# PhonopyFleurWorkChain), sending webhooks and building archives for all of
+# them. The daemon itself is ready: is_reported_by_caller() keeps runs called
+# by MPDSFleurStructureWorkChain from being scanned twice.
+#
+# A fresh archive_key is also needed: the current token is rejected with
+# 401 "Token has expired", so no archive reaches esdd.io.
+
+monitor_filters:
+  created_after: "2026-10-13"   # set to the day FLEUR monitoring starts
+
+workchain_hierarchy:
+  MPDSFleurStructureWorkChain:
+    # Lattice optimisation. One webhook per structure, labelled
+    # "<formula>/<sg> - optimization". The grandchild is the per-iteration
+    # evaluator the optimizer submits, which carries the FLEUR SCF runs.
+    AdamFleurSCFOptimizer:
+      - FleurSCFLatticeProblem
+    CDGFleurSCFOptimizer:
+      - FleurSCFLatticeProblem
+    BFGSFleurSCFOptimizer:
+      - FleurSCFLatticeProblem
+    RMSpropFleurSCFOptimizer:
+      - FleurSCFLatticeProblem
+    AdamFleurRelaxOptimizer:
+      - FleurRelaxLatticeProblem
+    CDGFleurRelaxOptimizer:
+      - FleurRelaxLatticeProblem
+    BFGSFleurRelaxOptimizer:
+      - FleurRelaxLatticeProblem
+    RMSpropFleurRelaxOptimizer:
+      - FleurRelaxLatticeProblem
+    # Phonons as one stage of the structure, mirroring CRYSTAL: one webhook
+    # labelled "<formula>/<sg> - phonons", and the displacements land in the
+    # structure's single archive.
+    PhonopyFleurWorkChain:
+      - FleurForcesWorkChain
+
+  # Phonon runs submitted on their own (scripts/submit_fleur_phonons.py) have no
+  # structure workchain above them, so the run itself is the root and each
+  # displacement is reported separately. Runs called by
+  # MPDSFleurStructureWorkChain are skipped here and reported as its child.
+  PhonopyFleurWorkChain:
+    FleurForcesWorkChain:
+      - FleurScfWorkChain
+      - FleurBaseWorkChain

@@ -3,9 +3,16 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import h5py
+import numpy as np
+import yaml
 import pytest
 
-from aiida_mpds_monitor.generate_archive import generate_archive, generate_parent_archive
+from aiida_mpds_monitor.generate_archive import (
+    _write_phonon_outputs,
+    generate_archive,
+    generate_parent_archive,
+)
 
 
 class DummyRetrievedFolder:
@@ -89,13 +96,9 @@ def test_generate_parent_archive_creates_named_root(mock_load_node, mock_archive
                 Path(tmp_dir) / "phon_repo", {"OUTPUT": b"phon", "INPUT": b"phon input"}
             ),
         )
-        child = DummyProcessNode(
-            uuid="child-uuid", called=[grandchild_opt, grandchild_phon]
-        )
+        child = DummyProcessNode(uuid="child-uuid", called=[grandchild_opt, grandchild_phon])
 
-        with patch(
-            "aiida_mpds_monitor.generate_archive.CalcJobNode", DummyCalcJobNode
-        ):
+        with patch("aiida_mpds_monitor.generate_archive.CalcJobNode", DummyCalcJobNode):
             archive_path = generate_parent_archive(
                 parent_uuid, base_nodes=[child], tmp_root=tmp_root
             )
@@ -149,9 +152,11 @@ def test_parent_archive_includes_submitted_input(tmp_path, input_filename, label
         assert not (folder / "_aiidasubmit.sh").exists()
         return _fake_archive_and_save(source_dir, **kwargs)
 
-    with patch("aiida_mpds_monitor.generate_archive.load_node", return_value=parent), patch(
-        "aiida_mpds_monitor.generate_archive.CalcJobNode", DummyCalcJobNode
-    ), patch("aiida_mpds_monitor.generate_archive.archive_and_save", side_effect=inspect_archive):
+    with (
+        patch("aiida_mpds_monitor.generate_archive.load_node", return_value=parent),
+        patch("aiida_mpds_monitor.generate_archive.CalcJobNode", DummyCalcJobNode),
+        patch("aiida_mpds_monitor.generate_archive.archive_and_save", side_effect=inspect_archive),
+    ):
         assert generate_parent_archive("parent", tmp_root=tmp_path / "tmp") is not None
 
 
@@ -163,9 +168,9 @@ def test_single_archive_preserves_retrieved_input(tmp_path, retrieved_input):
     calc = DummyCalcJobNode(
         uuid="calc", retrieved=_create_retrieved_folder(tmp_path / "outputs", files)
     )
-    calc.base = SimpleNamespace(repository=_create_retrieved_folder(
-        tmp_path / "inputs", {"INPUT": b"submitted input"}
-    ))
+    calc.base = SimpleNamespace(
+        repository=_create_retrieved_folder(tmp_path / "inputs", {"INPUT": b"submitted input"})
+    )
     calc.get_option = lambda name: "INPUT"
 
     def inspect_archive(source_dir, **kwargs):
@@ -173,8 +178,9 @@ def test_single_archive_preserves_retrieved_input(tmp_path, retrieved_input):
         assert (source_dir / "INPUT").read_bytes() == expected
         return _fake_archive_and_save(source_dir, **kwargs)
 
-    with patch("aiida_mpds_monitor.generate_archive.load_node", return_value=calc), patch(
-        "aiida_mpds_monitor.generate_archive.archive_and_save", side_effect=inspect_archive
+    with (
+        patch("aiida_mpds_monitor.generate_archive.load_node", return_value=calc),
+        patch("aiida_mpds_monitor.generate_archive.archive_and_save", side_effect=inspect_archive),
     ):
         assert generate_archive("calc", tmp_root=tmp_path / "tmp") is not None
 
@@ -186,9 +192,13 @@ def test_archive_without_saved_input_is_skipped(tmp_path, caplog):
     )
     calc.base = SimpleNamespace(repository=_create_retrieved_folder(tmp_path / "inputs", {}))
     calc.get_option = lambda name: "INPUT"
-    with patch("aiida_mpds_monitor.generate_archive.load_node", return_value=calc), patch(
-        "aiida_mpds_monitor.generate_archive.archive_and_save", side_effect=_fake_archive_and_save
-    ) as compress:
+    with (
+        patch("aiida_mpds_monitor.generate_archive.load_node", return_value=calc),
+        patch(
+            "aiida_mpds_monitor.generate_archive.archive_and_save",
+            side_effect=_fake_archive_and_save,
+        ) as compress,
+    ):
         assert generate_archive("calc", tmp_root=tmp_path / "tmp") is None
     compress.assert_not_called()
     assert "no saved INPUT" in caplog.text
@@ -202,7 +212,8 @@ def test_parent_archive_requires_input(tmp_path, caplog, label, retrieved_input)
     if retrieved_input:
         files["INPUT"] = b"retrieved input"
     calc = DummyCalcJobNode(
-        uuid="calc", label=label,
+        uuid="calc",
+        label=label,
         retrieved=_create_retrieved_folder(tmp_path / "outputs", files),
     )
     calc.base = SimpleNamespace(repository=_create_retrieved_folder(tmp_path / "inputs", {}))
@@ -214,11 +225,13 @@ def test_parent_archive_requires_input(tmp_path, caplog, label, retrieved_input)
         assert (source_dir / label / "INPUT").read_bytes() == b"retrieved input"
         return _fake_archive_and_save(source_dir, **kwargs)
 
-    with patch("aiida_mpds_monitor.generate_archive.load_node", return_value=parent), patch(
-        "aiida_mpds_monitor.generate_archive.CalcJobNode", DummyCalcJobNode
-    ), patch(
-        "aiida_mpds_monitor.generate_archive.archive_and_save", side_effect=inspect_archive
-    ) as compress:
+    with (
+        patch("aiida_mpds_monitor.generate_archive.load_node", return_value=parent),
+        patch("aiida_mpds_monitor.generate_archive.CalcJobNode", DummyCalcJobNode),
+        patch(
+            "aiida_mpds_monitor.generate_archive.archive_and_save", side_effect=inspect_archive
+        ) as compress,
+    ):
         result = generate_parent_archive("parent", tmp_root=tmp_path / "tmp")
 
     assert (result is not None) is retrieved_input
@@ -233,62 +246,67 @@ def test_single_archive_falls_back_to_repository_input(tmp_path):
         uuid="calc",
         retrieved=_create_retrieved_folder(tmp_path / "outputs", {"OUTPUT": b"result"}),
     )
-    calc.base = SimpleNamespace(repository=_create_retrieved_folder(
-        tmp_path / "inputs", {"INPUT": b"submitted input"}
-    ))
+    calc.base = SimpleNamespace(
+        repository=_create_retrieved_folder(tmp_path / "inputs", {"INPUT": b"submitted input"})
+    )
     calc.get_option = lambda name: "missing.d12"
 
     def inspect_archive(source_dir, **kwargs):
         assert (source_dir / "INPUT").read_bytes() == b"submitted input"
         return _fake_archive_and_save(source_dir, **kwargs)
 
-    with patch("aiida_mpds_monitor.generate_archive.load_node", return_value=calc), patch(
-        "aiida_mpds_monitor.generate_archive.archive_and_save", side_effect=inspect_archive
+    with (
+        patch("aiida_mpds_monitor.generate_archive.load_node", return_value=calc),
+        patch("aiida_mpds_monitor.generate_archive.archive_and_save", side_effect=inspect_archive),
     ):
         assert generate_archive("calc", tmp_root=tmp_path / "tmp") is not None
 
-@pytest.mark.parametrize('parent_mode', [False, True])
-@pytest.mark.parametrize('nested', [False, True])
-@pytest.mark.parametrize('broken', [False, True])
+
+@pytest.mark.parametrize("parent_mode", [False, True])
+@pytest.mark.parametrize("nested", [False, True])
+@pytest.mark.parametrize("broken", [False, True])
 def test_complete_retrieved_copy(tmp_path, monkeypatch, parent_mode, nested, broken):
     from aiida_mpds_monitor import generate_archive as module
     from io import BytesIO
 
-    filename = 'OUT.aiida/running_scf.log' if nested else 'OUTPUT'
-    files = {'INPUT': b'input', filename: b'converged'}
+    filename = "OUT.aiida/running_scf.log" if nested else "OUTPUT"
+    files = {"INPUT": b"input", filename: b"converged"}
 
     class Repository:
         def list_object_names(self):
-            return ['INPUT', 'OUT.aiida' if nested else 'OUTPUT']
+            return ["INPUT", "OUT.aiida" if nested else "OUTPUT"]
 
         def walk(self):
             if nested:
-                yield '', ['OUT.aiida'], ['INPUT']
-                yield 'OUT.aiida', [], ['running_scf.log']
+                yield "", ["OUT.aiida"], ["INPUT"]
+                yield "OUT.aiida", [], ["running_scf.log"]
             else:
-                yield '', [], ['INPUT', 'OUTPUT']
+                yield "", [], ["INPUT", "OUTPUT"]
 
         def open(self, name, mode):
             if broken and name == filename:
-                raise OSError('copy failed')
+                raise OSError("copy failed")
             return BytesIO(files[name])
 
-    calc = DummyCalcJobNode(uuid='calc', pk=1, retrieved=Repository())
-    parent = DummyProcessNode(uuid='parent', called=[calc])
-    monkeypatch.setattr(module, 'CalcJobNode', DummyCalcJobNode)
-    monkeypatch.setattr(module, 'load_node', lambda uuid: parent if parent_mode else calc)
+    calc = DummyCalcJobNode(uuid="calc", pk=1, retrieved=Repository())
+    parent = DummyProcessNode(uuid="parent", called=[calc])
+    monkeypatch.setattr(module, "CalcJobNode", DummyCalcJobNode)
+    monkeypatch.setattr(module, "load_node", lambda uuid: parent if parent_mode else calc)
     compressed = []
 
     def compress(source, **kwargs):
-        calculation_dir = source / 'DummyCalcJobNode' if parent_mode else source
-        assert (calculation_dir / filename).read_bytes() == b'converged'
-        assert (calculation_dir / 'INPUT').read_bytes() == b'input'
+        calculation_dir = source / "DummyCalcJobNode" if parent_mode else source
+        assert (calculation_dir / filename).read_bytes() == b"converged"
+        assert (calculation_dir / "INPUT").read_bytes() == b"input"
         compressed.append(source)
         return _fake_archive_and_save(source)
 
-    monkeypatch.setattr(module, 'archive_and_save', compress)
-    result = (module.generate_parent_archive('parent', base_nodes=[], tmp_root=tmp_path / 'stage')
-              if parent_mode else module.generate_archive('calc', tmp_root=tmp_path / 'stage'))
+    monkeypatch.setattr(module, "archive_and_save", compress)
+    result = (
+        module.generate_parent_archive("parent", base_nodes=[], tmp_root=tmp_path / "stage")
+        if parent_mode
+        else module.generate_archive("calc", tmp_root=tmp_path / "stage")
+    )
     assert (result is None) is broken
     assert bool(compressed) is not broken
 
@@ -302,8 +320,211 @@ def test_copy_real_aiida_repository(tmp_path):
     backend = SqliteTempBackend(SqliteTempBackend.create_profile())
     try:
         folder = FolderData(backend=backend)
-        folder.base.repository.put_object_from_filelike(BytesIO(b'log'), 'OUT.aiida/deep/running_scf.log')
+        folder.base.repository.put_object_from_filelike(
+            BytesIO(b"log"), "OUT.aiida/deep/running_scf.log"
+        )
         _copy_retrieved(folder, tmp_path)
-        assert (tmp_path / 'OUT.aiida/deep/running_scf.log').read_bytes() == b'log'
+        assert (tmp_path / "OUT.aiida/deep/running_scf.log").read_bytes() == b"log"
     finally:
         backend.close()
+
+
+def _capturing_archive_and_save(captured):
+    """Record the archive layout, which the caller deletes once compression ends."""
+
+    def _archive_and_save(source_dir, *args, **kwargs):
+        source = Path(source_dir)
+        captured["files"] = sorted(
+            str(path.relative_to(source)) for path in source.rglob("*") if path.is_file()
+        )
+        return _fake_archive_and_save(source_dir, *args, **kwargs)
+
+    return _archive_and_save
+
+
+def _toy_phonopy():
+    """Two-atom cell: three acoustic and three optical Gamma modes."""
+    from phonopy import Phonopy
+    from phonopy.structure.atoms import PhonopyAtoms
+
+    unitcell = PhonopyAtoms(
+        symbols=["Si", "Si"],
+        cell=np.eye(3) * 3.0,
+        scaled_positions=[[0.0, 0.0, 0.0], [0.5, 0.5, 0.5]],
+    )
+    return Phonopy(unitcell, supercell_matrix=np.eye(3, dtype=int), primitive_matrix=np.eye(3))
+
+
+def _toy_force_constants():
+    # Nearest-neighbour springs satisfying the acoustic sum rule exactly:
+    # shape (primitive=2, supercell=2, 3, 3), symmetrize keeps them intact.
+    force_constants = np.zeros((2, 2, 3, 3))
+    for i in range(3):
+        force_constants[0, 0, i, i] = 10.0
+        force_constants[1, 1, i, i] = 10.0
+        force_constants[0, 1, i, i] = -10.0
+        force_constants[1, 0, i, i] = -10.0
+    return force_constants
+
+
+def test_standard_phonon_outputs(tmp_path):
+    _write_phonon_outputs(_toy_phonopy(), _toy_force_constants(), tmp_path)
+    assert {p.name for p in tmp_path.iterdir()} == {
+        "qpoints.yaml", "mesh.hdf5", "thermal_properties.yaml",
+    }
+    gamma = yaml.safe_load((tmp_path / "qpoints.yaml").read_text())["phonon"][0]
+    frequencies = sorted(mode["frequency"] for mode in gamma["band"])
+    assert gamma["q-position"] == [0, 0, 0]
+    assert frequencies[:3] == pytest.approx([0, 0, 0], abs=0.002)
+    assert frequencies[3] > 3
+    assert frequencies[3:] == pytest.approx([frequencies[3]] * 3)
+    with h5py.File(tmp_path / "mesh.hdf5") as mesh:
+        assert mesh["mesh"][:].tolist() == [8, 8, 8]
+        assert mesh["frequency"].shape[1] == 6
+    thermal = yaml.safe_load((tmp_path / "thermal_properties.yaml").read_text())
+    assert thermal["zero_point_energy"] > 0
+    assert thermal["thermal_properties"][-1]["temperature"] == 300
+
+
+def test_parent_archive_survives_fleur_calculation_without_input(tmp_path):
+    """FLEUR runs have no INPUT deck in the repository; only CRYSTAL requires one."""
+    fleur = DummyCalcJobNode(
+        uuid="fleur-uuid",
+        label="scf: fleur run 1",
+        pk=91,
+        retrieved=_create_retrieved_folder(
+            tmp_path / "fleur_repo", {"out.xml": b"scf", "inp.xml": b"input"}
+        ),
+    )
+    fleur.process_label = "FleurCalculation"
+    child = DummyProcessNode(uuid="child-uuid", called=[fleur])
+    parent = DummyProcessNode(uuid="parent-uuid", label="MgO_225", called=[child])
+
+    with (
+        patch("aiida_mpds_monitor.generate_archive.load_node", return_value=parent),
+        patch("aiida_mpds_monitor.generate_archive.CalcJobNode", DummyCalcJobNode),
+        patch(
+            "aiida_mpds_monitor.generate_archive.archive_and_save",
+            side_effect=_fake_archive_and_save,
+        ),
+    ):
+        assert generate_parent_archive("parent-uuid", tmp_root=tmp_path / "tmp") is not None
+
+
+@pytest.mark.parametrize("fail", [False, True])
+def test_parent_archive_writes_phonopy_outputs(tmp_path, fail, caplog):
+    captured = {}
+    scf = DummyCalcJobNode(
+        uuid="scf-uuid",
+        label="scf: fleur run 1",
+        pk=81,
+        retrieved=_create_retrieved_folder(tmp_path / "scf_repo", {"out.xml": b"scf", "_scheduler-stderr.txt": b"SCF diagnostics"}),
+    )
+    scf.process_label = "FleurCalculation"
+    child = DummyProcessNode(uuid="child-uuid", called=[scf])
+    parent_calculation = DummyCalcJobNode(
+        uuid="phonopy-uuid",
+        label="",
+        pk=82,
+        retrieved=_create_retrieved_folder(
+            tmp_path / "phonopy_repo",
+            {
+                "aiida.out": b"constants",
+                "_scheduler-stdout.txt": b"",
+                "_scheduler-stderr.txt": b"Phonopy diagnostics",
+            },
+        ),
+    )
+    submitted = _create_retrieved_folder(tmp_path / "submitted", {"aiida.in": b"job options"})
+    parent_calculation.base = SimpleNamespace(repository=submitted)
+    parent_calculation.get_option = lambda name: "aiida.in"
+    parent_calculation.inputs.parameters = SimpleNamespace(get_dict=lambda: {"HDF5": True})
+    parent_calculation.process_label = "PhonopyCalculation"
+    parent = DummyProcessNode(
+        uuid="parent-uuid", label="MgAlO4_227 - phonons", called=[child, parent_calculation]
+    )
+
+    ph = _toy_phonopy()
+    parent_calculation.inputs.phonopy_data = SimpleNamespace(get_phonopy_instance=lambda: ph)
+    parent_calculation.outputs.output_force_constants = SimpleNamespace(
+        get_array=lambda name: _toy_force_constants()
+    )
+
+    if fail:
+        run_thermal_properties = ph.run_thermal_properties
+
+        def broken_thermal(**kwargs):
+            run_thermal_properties(**kwargs)
+            def fail_write(**kwargs):
+                raise OSError("disk error")
+            ph.thermal_properties.write_yaml = fail_write
+
+        ph.run_thermal_properties = broken_thermal
+
+    with (
+        patch("aiida_mpds_monitor.generate_archive.load_node", return_value=parent),
+        patch("aiida_mpds_monitor.generate_archive.CalcJobNode", DummyCalcJobNode),
+        patch(
+            "aiida_mpds_monitor.generate_archive.archive_and_save",
+            side_effect=_capturing_archive_and_save(captured),
+        ),
+    ):
+        assert generate_parent_archive(
+            "parent-uuid", base_nodes=[child], tmp_root=tmp_path / "tmp", save_input_json=True
+        ) is not None
+
+    expected = {
+        "scf: fleur run 1/out.xml",
+        "scf: fleur run 1/_scheduler-stderr.txt",
+    }
+    if not fail:
+        expected.update(
+            f"PhonopyCalculation/{name}"
+            for name in ("mesh.hdf5", "qpoints.yaml", "thermal_properties.yaml")
+        )
+    assert set(captured["files"]) == expected
+    assert ("disk error" in caplog.text) is fail
+
+
+
+@pytest.mark.parametrize(
+    ("labels", "dirs"),
+    [
+        (
+            ("Fleur forces calculation 01", "Fleur forces calculation 02"),
+            ("Fleur forces calculation 01", "Fleur forces calculation 02"),
+        ),
+        (
+            ("Fleur forces calculation [1]", "Fleur forces calculation [2]"),
+            ("forces calculation", "forces calculation_102"),
+        ),
+    ],
+)
+def test_fleur_displacement_folders(tmp_path, labels, dirs):
+    jobs = []
+    for pk, label in enumerate(labels, start=101):
+        job = DummyCalcJobNode(
+            uuid=f"forces-{pk}",
+            label=label,
+            pk=pk,
+            retrieved=_create_retrieved_folder(
+                tmp_path / str(pk), {"out.xml": str(pk).encode()}
+            ),
+        )
+        job.process_label = "FleurCalculation"
+        jobs.append(job)
+
+    parent = DummyProcessNode(uuid="parent-uuid", label="MgO_225 - phonons", called=jobs)
+
+    def check_archive(source_dir, *args, **kwargs):
+        assert {path.name for path in source_dir.iterdir()} == set(dirs)
+        for pk, dirname in enumerate(dirs, start=101):
+            assert (source_dir / dirname / "out.xml").read_bytes() == str(pk).encode()
+        return _fake_archive_and_save(source_dir, *args, **kwargs)
+
+    with (
+        patch("aiida_mpds_monitor.generate_archive.load_node", return_value=parent),
+        patch("aiida_mpds_monitor.generate_archive.CalcJobNode", DummyCalcJobNode),
+        patch("aiida_mpds_monitor.generate_archive.archive_and_save", side_effect=check_archive),
+    ):
+        assert generate_parent_archive("parent-uuid", tmp_root=tmp_path / "tmp") is not None

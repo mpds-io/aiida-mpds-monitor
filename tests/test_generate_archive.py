@@ -3,12 +3,13 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import h5py
 import numpy as np
+import yaml
 import pytest
 
 from aiida_mpds_monitor.generate_archive import (
-    _collect_phonon_data,
-    _phonon_frequencies,
+    _write_phonon_outputs,
     generate_archive,
     generate_parent_archive,
 )
@@ -366,81 +367,23 @@ def _toy_force_constants():
     return force_constants
 
 
-def test_phonon_frequencies_summarizes_a_simple_crystal():
-    summary = _phonon_frequencies(_toy_phonopy(), _toy_force_constants())
-
-    assert "engine" not in summary
-    assert summary["mesh"] == [8, 8, 8]
-    assert summary["n_bands"] == 6
-    assert summary["n_qpoints"] > 0
-    assert summary["n_imaginary"] == 0
-
-    gamma = sorted(summary["gamma_frequencies_cm1"])
-    assert len(gamma) == 6
-    # Three acoustic modes vanish at Gamma, three optical ones are degenerate.
-    assert all(abs(frequency) < 0.05 for frequency in gamma[:3])
-    assert all(frequency > 100 for frequency in gamma[3:])
-    assert gamma[3] == gamma[4] == gamma[5]
-
-    assert summary["zero_point_energy"] > 0
-    assert summary["zero_point_energy_units"] == "eV/cell"
-
-    thermodynamics = summary["thermodynamics"]
-    assert thermodynamics["temperature"] == 300.0
-    assert thermodynamics["free_energy_kjmol"] > 0
-    assert thermodynamics["entropy_jkmol"] > 0
-    assert thermodynamics["heat_capacity_jkmol"] > 0
-
-
-@pytest.mark.parametrize(
-    ("process_type", "engine"),
-    [
-        ("aiida.workflows:phonopy.fleur", "fleur"),
-        ("aiida.workflows:phonopy.vasp", None),
-        (None, None),
-    ],
-)
-def test_collect_phonon_data_uses_force_constants_and_space_group(
-    tmp_path, caplog, process_type, engine
-):
-    node = DummyCalcJobNode(
-        uuid="phonopy-uuid",
-        label="",
-        pk=71,
-        retrieved=_create_retrieved_folder(tmp_path / "repo", {"aiida.out": b"constants"}),
-    )
-    node.process_label = "PhonopyCalculation"
-    node.caller = SimpleNamespace(process_type=process_type) if process_type else None
-    node.inputs = SimpleNamespace(phonopy_data=SimpleNamespace(get_phonopy_instance=_toy_phonopy))
-    node.outputs = SimpleNamespace(
-        retrieved=node.outputs.retrieved,
-        output_force_constants=SimpleNamespace(get_array=lambda name: _toy_force_constants()),
-        output_parameters=SimpleNamespace(
-            base=SimpleNamespace(
-                attributes=SimpleNamespace(all={"space_group": {"type": "Fd-3m", "number": 227}})
-            )
-        ),
-    )
-
-    summary = _collect_phonon_data(node)
-
-    assert summary is not None
-    assert summary.get("engine") == engine
-    assert ("Unknown force engine" in caplog.text) is (engine is None)
-    assert summary["space_group"] == {"type": "Fd-3m", "number": 227}
-    assert len(summary["gamma_frequencies_cm1"]) == 6
-    assert summary["n_bands"] == 6
-
-
-def test_collect_phonon_data_without_force_constants_returns_none(tmp_path):
-    node = DummyCalcJobNode(
-        uuid="scf-uuid",
-        label="scf: fleur run 1",
-        pk=72,
-        retrieved=_create_retrieved_folder(tmp_path / "repo", {"out.xml": b"results"}),
-    )
-
-    assert _collect_phonon_data(node) is None
+def test_standard_phonon_outputs(tmp_path):
+    _write_phonon_outputs(_toy_phonopy(), _toy_force_constants(), tmp_path)
+    assert {p.name for p in tmp_path.iterdir()} == {
+        "qpoints.yaml", "mesh.hdf5", "thermal_properties.yaml",
+    }
+    gamma = yaml.safe_load((tmp_path / "qpoints.yaml").read_text())["phonon"][0]
+    frequencies = sorted(mode["frequency"] for mode in gamma["band"])
+    assert gamma["q-position"] == [0, 0, 0]
+    assert frequencies[:3] == pytest.approx([0, 0, 0], abs=0.002)
+    assert frequencies[3] > 3
+    assert frequencies[3:] == pytest.approx([frequencies[3]] * 3)
+    with h5py.File(tmp_path / "mesh.hdf5") as mesh:
+        assert mesh["mesh"][:].tolist() == [8, 8, 8]
+        assert mesh["frequency"].shape[1] == 6
+    thermal = yaml.safe_load((tmp_path / "thermal_properties.yaml").read_text())
+    assert thermal["zero_point_energy"] > 0
+    assert thermal["thermal_properties"][-1]["temperature"] == 300
 
 
 def test_parent_archive_survives_fleur_calculation_without_input(tmp_path):
@@ -468,7 +411,8 @@ def test_parent_archive_survives_fleur_calculation_without_input(tmp_path):
         assert generate_parent_archive("parent-uuid", tmp_root=tmp_path / "tmp") is not None
 
 
-def test_parent_archive_writes_phonon_json(tmp_path):
+@pytest.mark.parametrize("fail", [False, True])
+def test_parent_archive_writes_phonopy_outputs(tmp_path, fail, caplog):
     captured = {}
     scf = DummyCalcJobNode(
         uuid="scf-uuid",
@@ -489,33 +433,43 @@ def test_parent_archive_writes_phonon_json(tmp_path):
         uuid="parent-uuid", label="MgAlO4_227 - phonons", called=[child, parent_calculation]
     )
 
-    def fake_phonon_data(calculation):
-        if getattr(calculation, "pk", None) == 82:
-            return {"engine": "fleur", "gamma_frequencies_cm1": [12.5, 300.0], "n_imaginary": 0}
-        return None
+    ph = _toy_phonopy()
+    parent_calculation.inputs.phonopy_data = SimpleNamespace(get_phonopy_instance=lambda: ph)
+    parent_calculation.outputs.output_force_constants = SimpleNamespace(
+        get_array=lambda name: _toy_force_constants()
+    )
+
+    if fail:
+        run_thermal_properties = ph.run_thermal_properties
+
+        def broken_thermal(**kwargs):
+            run_thermal_properties(**kwargs)
+            def fail_write(**kwargs):
+                raise OSError("disk error")
+            ph.thermal_properties.write_yaml = fail_write
+
+        ph.run_thermal_properties = broken_thermal
 
     with (
         patch("aiida_mpds_monitor.generate_archive.load_node", return_value=parent),
         patch("aiida_mpds_monitor.generate_archive.CalcJobNode", DummyCalcJobNode),
         patch(
-            "aiida_mpds_monitor.generate_archive._collect_phonon_data",
-            side_effect=fake_phonon_data,
-        ),
-        patch(
             "aiida_mpds_monitor.generate_archive.archive_and_save",
             side_effect=_capturing_archive_and_save(captured),
         ),
     ):
-        assert (
-            generate_parent_archive("parent-uuid", base_nodes=[child], tmp_root=tmp_path / "tmp")
-            is not None
-        )
+        assert generate_parent_archive(
+            "parent-uuid", base_nodes=[child], tmp_root=tmp_path / "tmp"
+        ) is not None
 
-    assert captured["files"] == [
-        "PhonopyCalculation/PHONON.json",
-        "PhonopyCalculation/aiida.out",
-        "scf: fleur run 1/out.xml",
-    ]
+    expected = {"PhonopyCalculation/aiida.out", "scf: fleur run 1/out.xml"}
+    if not fail:
+        expected.update(
+            f"PhonopyCalculation/{name}"
+            for name in ("mesh.hdf5", "qpoints.yaml", "thermal_properties.yaml")
+        )
+    assert set(captured["files"]) == expected
+    assert ("disk error" in caplog.text) is fail
 
 
 

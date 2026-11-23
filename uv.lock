@@ -89,12 +89,11 @@ dependencies = [
 
 [[package]]
 name = "aiida-mpds-monitor"
-version = "0.12.2"
+version = "0.12.3"
 source = { editable = "." }
 dependencies = [
     { name = "aiida-core" },
     { name = "dft-organizer" },
-    { name = "numpy" },
     { name = "pyyaml" },
     { name = "requests" },
 ]
@@ -113,7 +112,6 @@ dev = [
 requires-dist = [
     { name = "aiida-core", specifier = ">=2.0" },
     { name = "dft-organizer", git = "https://github.com/mpds-io/dft_organizer.git" },
-    { name = "numpy" },
     { name = "phonopy", marker = "extra == 'dev'", specifier = ">=2.19.1" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=6.0" },
     { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=2.12" },

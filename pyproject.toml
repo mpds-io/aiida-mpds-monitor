@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "aiida-mpds-monitor"
-version = "0.12.2"
+version = "0.12.3"
 description = "AiiDA webhook monitor for MPDS workflows"
 readme = "README.md"
 license = "MIT"
@@ -27,7 +27,6 @@ classifiers = [
 requires-python = ">=3.9"
 dependencies = [
     "aiida-core>=2.0",
-    "numpy",
     "PyYAML",
     "requests",
     "dft_organizer @ git+https://github.com/mpds-io/dft_organizer",

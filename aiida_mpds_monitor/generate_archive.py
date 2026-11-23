@@ -4,9 +4,8 @@ import re
 import shutil
 from itertools import chain
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Any, Dict, Iterable, List, Optional
-
-import numpy as np
 
 from aiida import load_profile as load_aiida_profile
 from aiida.orm import CalcJobNode, load_node, WorkChainNode
@@ -36,9 +35,6 @@ LABEL_DICT = {
 
 # Phonon summary parameters, shared with the dft_organizer phonon reporting.
 PHONON_MESH = [8, 8, 8]
-IMAGINARY_THRESHOLD_CM1 = -1.67
-THZ_TO_CM1 = 33.35641
-KJ_MOL_PER_EV = 96.4853321233
 
 
 def _requires_saved_input(calculation: Any) -> bool:
@@ -283,113 +279,49 @@ def _iter_archive_calculations(parent_node: Any, base_nodes: Iterable[Any]) -> I
             yield node
 
 
-def _phonon_frequencies(phonopy_instance: Any, force_constants: Any) -> dict:
-    """Compute the phonon summary ``PHONON.json`` is built from.
-
-    The phonopy instance works in its default THz units: frequencies are
-    converted to cm-1 afterwards, while the thermodynamic properties must be
-    evaluated from THz to stay correct (phonopy physical constants assume THz).
-    """
+def _write_phonon_outputs(phonopy_instance: Any, force_constants: Any, directory: Path) -> None:
+    """Run the phonon post-processing and write the standard Phonopy outputs."""
     ph = phonopy_instance
     ph.force_constants = force_constants
     ph.symmetrize_force_constants()
-
     ph.run_mesh(PHONON_MESH)
-    mesh = ph.get_mesh_dict()
-    freqs_cm1 = np.asarray(mesh["frequencies"], dtype=float) * THZ_TO_CM1
-    n_qpoints, n_bands = freqs_cm1.shape
-
     ph.run_qpoints([[0.0, 0.0, 0.0]])
-    gamma_cm1 = np.asarray(ph.get_qpoints_dict()["frequencies"])[0] * THZ_TO_CM1
-
     ph.run_thermal_properties(t_min=0, t_max=300, t_step=300)
-    thermal = ph.get_thermal_properties_dict()
-    temperatures = list(thermal["temperatures"])
-    index_zero = min(range(len(temperatures)), key=lambda i: abs(temperatures[i]))
-    index_300 = min(range(len(temperatures)), key=lambda i: abs(temperatures[i] - 300))
 
-    zero_point_ev = float(thermal["free_energy"][index_zero]) / KJ_MOL_PER_EV
-
-    return {
-        "source": "aiida-mpds-monitor",
-        "mesh": list(PHONON_MESH),
-        "gamma_frequencies_cm1": [round(float(f), 2) for f in gamma_cm1],
-        "n_imaginary": int((freqs_cm1 < IMAGINARY_THRESHOLD_CM1).sum()),
-        "n_qpoints": int(n_qpoints),
-        "n_bands": int(n_bands),
-        "zero_point_energy": round(zero_point_ev, 4),
-        "zero_point_energy_units": "eV/cell",
-        "thermodynamics": {
-            "temperature": float(temperatures[index_300]),
-            "temperature_units": "K",
-            "free_energy_kjmol": round(float(thermal["free_energy"][index_300]), 3),
-            "free_energy_units": "kJ/mol",
-            "entropy_jkmol": round(float(thermal["entropy"][index_300]), 3),
-            "entropy_units": "J/(mol*K)",
-            "heat_capacity_jkmol": round(float(thermal["heat_capacity"][index_300]), 3),
-            "heat_capacity_units": "J/(mol*K)",
-        },
-    }
+    with TemporaryDirectory(dir=directory.parent) as temporary:
+        staging = Path(temporary)
+        ph.qpoints.write_yaml(filename=str(staging / "qpoints.yaml"))
+        ph.mesh.write_hdf5(filename=str(staging / "mesh.hdf5"))
+        ph.thermal_properties.write_yaml(filename=str(staging / "thermal_properties.yaml"))
+        published = []
+        try:
+            for path in staging.iterdir():
+                target = directory / path.name
+                path.replace(target)
+                published.append(target)
+        except OSError:
+            for target in published:
+                target.unlink(missing_ok=True)
+            raise
 
 
-def _calculation_attributes(parameters_node: Any) -> Optional[dict]:
-    """Return the attributes of an AiiDA data node holding a plain dict."""
-    try:
-        return parameters_node.base.attributes.all
-    except AttributeError:
-        pass
-    try:
-        return parameters_node.get_dict()
-    except Exception:
-        return None
-
-
-def _collect_phonon_data(calculation: Any) -> Optional[dict]:
-    """Return the phonon summary for a calculation holding force constants.
-
-    Phonopy-style calculations are the only ones exposing force constants as
-    an output and phonopy metadata as an input; everything else (SCF, inpgen,
-    forces runs) yields ``None`` and never writes ``PHONON.json``. Failures
-    never break archive generation: the calculation directory is still
-    shipped, just without the summary.
-    """
+def _write_calculation_phonon_outputs(calculation: Any, directory: Path) -> None:
+    """Export phonons when the calculation provides the required AiiDA data."""
+    if getattr(calculation, "process_label", None) != "PhonopyCalculation":
+        return
     try:
         phonopy_data = calculation.inputs.phonopy_data
-        force_constants = calculation.outputs.output_force_constants.get_array("force_constants")
-    except Exception:
-        return None
-
-    identifier = f"{getattr(calculation, 'process_label', '?')} {getattr(calculation, 'pk', '?')}"
-
+        force_constants_node = calculation.outputs.output_force_constants
+    except AttributeError:
+        return
     try:
-        phonopy_instance = phonopy_data.get_phonopy_instance()
+        _write_phonon_outputs(
+            phonopy_data.get_phonopy_instance(),
+            force_constants_node.get_array("force_constants"),
+            directory,
+        )
     except Exception as exc:
-        logger.warning("Could not rebuild phonopy instance for %s: %s", identifier, exc)
-        return None
-
-    try:
-        summary = _phonon_frequencies(phonopy_instance, force_constants)
-    except Exception as exc:
-        logger.warning("Could not compute phonon frequencies for %s: %s", identifier, exc)
-        return None
-
-    try:
-        caller = getattr(calculation, "caller", None)
-        if getattr(caller, "process_type", None) == "aiida.workflows:phonopy.fleur":
-            summary["engine"] = "fleur"
-        else:
-            logger.warning("Unknown force engine for %s; leaving engine unset", identifier)
-    except Exception as exc:
-        logger.warning("Could not check force provenance for %s: %s", identifier, exc)
-
-    try:
-        params = _calculation_attributes(calculation.outputs.output_parameters)
-        if params and params.get("space_group"):
-            summary["space_group"] = params["space_group"]
-    except Exception:
-        pass
-
-    return summary
+        logger.warning("Could not write Phonopy outputs for calculation %s: %s", calculation.pk, exc)
 
 
 def has_publishable_results(parent_node: Any, base_nodes: Iterable[Any]) -> bool:
@@ -646,16 +578,7 @@ def generate_parent_archive(
             except Exception as e:
                 print(f"Warning: Could not save INPUT.json for {label_} {calculation.pk}: {e}")
 
-            # A phonopy calculation holds the force constants; the ESDD upload
-            # needs the resulting frequencies and cannot recompute them from
-            # the archived files alone.
-            phonon_data = _collect_phonon_data(calculation)
-            if phonon_data is not None:
-                try:
-                    with (calculation_dir / "PHONON.json").open("w") as f:
-                        json.dump(phonon_data, f, indent=2)
-                except Exception as e:
-                    print(f"Warning: Could not save PHONON.json for {label_} {calculation.pk}: {e}")
+            _write_calculation_phonon_outputs(calculation, calculation_dir)
 
         if skipped:
             logger.warning(

@@ -109,6 +109,14 @@ def test_disabled_or_invalid_threshold(hours):
     assert tracker.overdue_report() is None
 
 
+def test_statistics_omits_disabled_running_limit():
+    tracker = RunningNotifications(MagicMock(), hours=None)
+    tracker.finish_scan()
+    report = tracker.statistics_report(allocated_servers=1)
+    assert "RUNNING: 0" in report
+    assert "Running time limit" not in report
+
+
 def test_observation_never_calls_delivery():
     notifier = MagicMock()
     notifier.notify.side_effect = RuntimeError("unavailable")

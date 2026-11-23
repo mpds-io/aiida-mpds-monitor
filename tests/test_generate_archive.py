@@ -418,7 +418,7 @@ def test_parent_archive_writes_phonopy_outputs(tmp_path, fail, caplog):
         uuid="scf-uuid",
         label="scf: fleur run 1",
         pk=81,
-        retrieved=_create_retrieved_folder(tmp_path / "scf_repo", {"out.xml": b"scf"}),
+        retrieved=_create_retrieved_folder(tmp_path / "scf_repo", {"out.xml": b"scf", "_scheduler-stderr.txt": b"SCF diagnostics"}),
     )
     scf.process_label = "FleurCalculation"
     child = DummyProcessNode(uuid="child-uuid", called=[scf])
@@ -426,7 +426,14 @@ def test_parent_archive_writes_phonopy_outputs(tmp_path, fail, caplog):
         uuid="phonopy-uuid",
         label="",
         pk=82,
-        retrieved=_create_retrieved_folder(tmp_path / "phonopy_repo", {"aiida.out": b"constants"}),
+        retrieved=_create_retrieved_folder(
+            tmp_path / "phonopy_repo",
+            {
+                "aiida.out": b"constants",
+                "_scheduler-stdout.txt": b"",
+                "_scheduler-stderr.txt": b"Phonopy diagnostics",
+            },
+        ),
     )
     parent_calculation.process_label = "PhonopyCalculation"
     parent = DummyProcessNode(
@@ -462,7 +469,11 @@ def test_parent_archive_writes_phonopy_outputs(tmp_path, fail, caplog):
             "parent-uuid", base_nodes=[child], tmp_root=tmp_path / "tmp"
         ) is not None
 
-    expected = {"PhonopyCalculation/aiida.out", "scf: fleur run 1/out.xml"}
+    expected = {
+        "PhonopyCalculation/aiida.out",
+        "scf: fleur run 1/out.xml",
+        "scf: fleur run 1/_scheduler-stderr.txt",
+    }
     if not fail:
         expected.update(
             f"PhonopyCalculation/{name}"

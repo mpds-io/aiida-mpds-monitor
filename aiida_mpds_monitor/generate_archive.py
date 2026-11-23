@@ -153,16 +153,20 @@ def _safe_dir_name(name: str) -> str:
     return result
 
 
-def _copy_retrieved(folder: Any, destination: Path) -> List[str]:
-    """Copy the complete repository tree; propagate errors to abort publication."""
+def _copy_retrieved(
+    folder: Any, destination: Path, *, exclude: frozenset[str] = frozenset()
+) -> List[str]:
+    """Copy the repository tree, skipping explicitly excluded relative paths."""
     repository = getattr(getattr(folder, "base", None), "repository", folder)
-    names = folder.list_object_names()
+    names = [name for name in folder.list_object_names() if name not in exclude]
     if hasattr(repository, "walk"):
         for directory, directories, files in repository.walk():
             target = destination / directory
             target.mkdir(parents=True, exist_ok=True)
             for name in files:
                 relative = str(Path(directory) / name)
+                if relative in exclude:
+                    continue
                 with repository.open(relative, "rb") as source, (target / name).open("wb") as dest:
                     shutil.copyfileobj(source, dest)
     else:
@@ -554,7 +558,12 @@ def generate_parent_archive(
             if stage_nodes is not None:
                 stage_nodes[label_str] = calculation
             try:
-                _copy_retrieved(repo_folder, calculation_dir)
+                scheduler_logs = (
+                    frozenset({"_scheduler-stdout.txt", "_scheduler-stderr.txt"})
+                    if process_label == "PhonopyCalculation"
+                    else frozenset()
+                )
+                _copy_retrieved(repo_folder, calculation_dir, exclude=scheduler_logs)
             except Exception as exc:
                 logger.warning("Could not copy retrieved results for %s: %s", calculation.pk, exc)
                 return None

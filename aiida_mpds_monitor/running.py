@@ -358,6 +358,4 @@ class RunningNotifications:
         lines.append(f"RUNNING: {len(entries)}")
         if self.hours is not None:
             lines.append(f"Running longer than {self.hours:g} h: {overdue_count}")
-        else:
-            lines.append("Running time limit: disabled")
         return "\n".join(lines)

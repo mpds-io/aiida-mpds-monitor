@@ -435,6 +435,10 @@ def test_parent_archive_writes_phonopy_outputs(tmp_path, fail, caplog):
             },
         ),
     )
+    submitted = _create_retrieved_folder(tmp_path / "submitted", {"aiida.in": b"job options"})
+    parent_calculation.base = SimpleNamespace(repository=submitted)
+    parent_calculation.get_option = lambda name: "aiida.in"
+    parent_calculation.inputs.parameters = SimpleNamespace(get_dict=lambda: {"HDF5": True})
     parent_calculation.process_label = "PhonopyCalculation"
     parent = DummyProcessNode(
         uuid="parent-uuid", label="MgAlO4_227 - phonons", called=[child, parent_calculation]
@@ -466,11 +470,10 @@ def test_parent_archive_writes_phonopy_outputs(tmp_path, fail, caplog):
         ),
     ):
         assert generate_parent_archive(
-            "parent-uuid", base_nodes=[child], tmp_root=tmp_path / "tmp"
+            "parent-uuid", base_nodes=[child], tmp_root=tmp_path / "tmp", save_input_json=True
         ) is not None
 
     expected = {
-        "PhonopyCalculation/aiida.out",
         "scf: fleur run 1/out.xml",
         "scf: fleur run 1/_scheduler-stderr.txt",
     }

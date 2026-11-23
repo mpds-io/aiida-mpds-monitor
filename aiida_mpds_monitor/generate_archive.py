@@ -557,25 +557,26 @@ def generate_parent_archive(
             calculation_dir.mkdir(parents=True, exist_ok=False)
             if stage_nodes is not None:
                 stage_nodes[label_str] = calculation
+            is_phonopy = process_label == "PhonopyCalculation"
             try:
-                scheduler_logs = (
-                    frozenset({"_scheduler-stdout.txt", "_scheduler-stderr.txt"})
-                    if process_label == "PhonopyCalculation"
+                excluded_files = (
+                    frozenset({"_scheduler-stdout.txt", "_scheduler-stderr.txt", "aiida.in", "aiida.out"})
+                    if is_phonopy
                     else frozenset()
                 )
-                _copy_retrieved(repo_folder, calculation_dir, exclude=scheduler_logs)
+                _copy_retrieved(repo_folder, calculation_dir, exclude=excluded_files)
             except Exception as exc:
                 logger.warning("Could not copy retrieved results for %s: %s", calculation.pk, exc)
                 return None
 
-            if not _copy_calculation_input(
+            if not is_phonopy and not _copy_calculation_input(
                 calculation, calculation_dir, names, required=_requires_saved_input(calculation)
             ):
                 return None
 
             try:
                 params = None
-                if save_input_json and hasattr(calculation.inputs, "parameters"):
+                if not is_phonopy and save_input_json and hasattr(calculation.inputs, "parameters"):
                     try:
                         params = calculation.inputs.parameters.get_dict()
                     except Exception:
@@ -588,6 +589,10 @@ def generate_parent_archive(
                 print(f"Warning: Could not save INPUT.json for {label_} {calculation.pk}: {e}")
 
             _write_calculation_phonon_outputs(calculation, calculation_dir)
+            if is_phonopy and not any(calculation_dir.iterdir()):
+                calculation_dir.rmdir()
+                if stage_nodes is not None:
+                    stage_nodes.pop(label_str, None)
 
         if skipped:
             logger.warning(
